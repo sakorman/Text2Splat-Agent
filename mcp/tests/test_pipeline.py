@@ -5,7 +5,7 @@ from pathlib import Path
 
 import anyio
 import httpx
-from PIL import Image
+from PIL import Image, PngImagePlugin
 import pytest
 
 from graphics_mcp.creative import Creative
@@ -25,6 +25,7 @@ def png(index=0):
 class FakeProviders:
     def __init__(self, consistent=True):
         self.calls = 0
+        self.reviews = 0
         self.consistent = consistent
         self.on_image = None
 
@@ -38,6 +39,7 @@ class FakeProviders:
         return png(self.calls)
 
     def review(self, reference, views):
+        self.reviews += 1
         assert len(views) == 12
         return {"consistent": self.consistent, "reason": "一致" if self.consistent else "结构不一致", "scope": "appearance_only"}
 
@@ -87,6 +89,7 @@ def test_full_image_pipeline_and_review_gate(setup):
     result = store.get(multi["id"])
     assert result["status"] == "succeeded"
     assert len(result["assets"]) == 12 and fake.calls == 13
+    assert fake.reviews == 1
     manifest = store.manifest(multi["id"])
     assert manifest["reference_conditioned"] is False
     assert manifest["geometry_verified"] is False
@@ -108,13 +111,42 @@ def test_cancel_during_image_response_never_starts_next_image(setup):
     assert store.get(job["id"])["status"] == "cancelled"
 
 
-def test_duplicate_views_are_rejected(setup):
-    _, store, fake, creative = setup
+@pytest.mark.parametrize("duplicate_at", [2, 7, 12])
+def test_duplicate_views_stop_generation_immediately(setup, duplicate_at):
+    settings, store, fake, creative = setup
     ref = completed_reference(creative, store)
-    fake.image = lambda *args: png(1)
+    # Different PNG bytes and metadata, but the same decoded pixels as view 1.
+    encoded = io.BytesIO()
+    metadata = PngImagePlugin.PngInfo()
+    metadata.add_text("comment", "same image, different encoding")
+    with Image.open(io.BytesIO(png(1))) as image:
+        image.save(encoded, "PNG", pnginfo=metadata, compress_level=0)
+    repeated = encoded.getvalue()
+    assert repeated != png(1)
+    calls = []
+
+    def image(prompt, reference):
+        calls.append(prompt)
+        return repeated if len(calls) == duplicate_at else png(len(calls))
+
+    fake.image = image
     job = creative.multiview(ref, "duplicates")
     creative.execute(*store.claim())
-    assert store.get(job["id"])["status"] == "needs_review"
+    assert len(calls) == duplicate_at
+    assert fake.reviews == 0
+    state = store.get(job["id"])
+    assert state["status"] == "needs_review"
+    assert f"第 {duplicate_at} 张" in state["message"]
+    assert "第 1 张" in state["message"]
+    assert len(state["assets"]) == duplicate_at
+    assert state["assets"][0]["sha256"] == state["assets"][-1]["sha256"]
+    assert all((store.directory(job["id"]) / asset["name"]).is_file() for asset in state["assets"])
+    assert "asset_set_id" not in state
+    assert not (store.directory(job["id"]) / "manifest.json").exists()
+    with pytest.raises(ValueError, match="尚未完成"):
+        Webscan(settings, store).import_views(job["id"])
+    assert creative.multiview(ref, "duplicates")["id"] == job["id"]
+    assert store.claim() is None
 
 
 def test_missing_key_paid_opt_in_and_path_validation(setup):
