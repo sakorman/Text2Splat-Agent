@@ -5,6 +5,7 @@ import org.springframework.context.annotation.Configuration;
 import redis.clients.jedis.JedisPooled;
 
 @Configuration
+@org.springframework.context.annotation.Profile("!graphics")
 public class RedisConfig {
     @Bean
     public JedisPooled jedisPoolConfig() {

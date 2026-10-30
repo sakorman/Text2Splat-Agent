@@ -10,6 +10,7 @@ import java.io.FileWriter;
 import java.io.IOException;
 
 @Component
+@org.springframework.context.annotation.Profile("!graphics")
 public class CodeTools {
     @Tool(description = "创建用户要求创建的文件,并且把生成的代码写入文件")
     public static boolean writeFile(@ToolParam(description = "用户要求创建的文件的名称")String fileName, @ToolParam(description = "你生成的代码的内容")String content) {

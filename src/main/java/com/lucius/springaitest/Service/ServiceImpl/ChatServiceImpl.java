@@ -15,6 +15,7 @@ import java.util.Set;
 
 
 @Service
+@org.springframework.context.annotation.Profile("!graphics")
 public class ChatServiceImpl implements ChatService {
     @Autowired
     private StringRedisTemplate stringRedisTemplate;

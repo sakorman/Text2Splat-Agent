@@ -24,6 +24,7 @@ import java.util.List;
 
 
 @Component
+@org.springframework.context.annotation.Profile("!graphics")
 public class CourseTools {
     @Autowired
     private StringRedisTemplate stringRedisTemplate;
