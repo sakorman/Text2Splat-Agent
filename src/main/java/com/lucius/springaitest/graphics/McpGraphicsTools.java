@@ -6,14 +6,23 @@ import io.modelcontextprotocol.client.McpClient;
 import io.modelcontextprotocol.client.McpSyncClient;
 import io.modelcontextprotocol.client.transport.WebClientStreamableHttpTransport;
 import io.modelcontextprotocol.spec.McpSchema;
+import io.modelcontextprotocol.spec.McpError;
+import io.modelcontextprotocol.spec.McpTransportException;
+import io.modelcontextprotocol.spec.McpTransportSessionClosedException;
+import io.modelcontextprotocol.spec.McpTransportSessionNotFoundException;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import jakarta.annotation.PreDestroy;
+import java.io.IOException;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeoutException;
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.WebClientRequestException;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 
 @Component
 @Profile("graphics")
@@ -54,10 +63,24 @@ public class McpGraphicsTools implements GraphicsTools {
     public JsonNode call(String name, Map<String, Object> arguments) {
         if (!ALLOWED.contains(name)) throw new IllegalArgumentException("未知图形工具");
         String server = name.startsWith("creative_") ? "creative" : "webscan";
+        McpSchema.CallToolResult result;
+        try {
+            result = client(server).callTool(new McpSchema.CallToolRequest(name, arguments));
+        } catch (RuntimeException e) {
+            disconnect(server);
+            // No retry here: a timed-out mutation may already have been accepted.
+            String message = server + " MCP 暂不可用或请求结果未知，请检查本地服务";
+            if (isTemporaryConnectionFailure(e)) throw new GraphicsToolUnavailableException(message, e);
+            throw new IllegalStateException(message, e);
+        }
+        return decodeResult(result);
+    }
+
+    JsonNode decodeResult(McpSchema.CallToolResult result) {
+        if (result == null || Boolean.TRUE.equals(result.isError()))
+            throw new IllegalStateException("MCP 工具执行失败，请检查输入和配置");
         JsonNode body;
         try {
-            var result = client(server).callTool(new McpSchema.CallToolRequest(name, arguments));
-            if (Boolean.TRUE.equals(result.isError())) throw new IllegalStateException("MCP tool error");
             if (result.structuredContent() != null) body = mapper.valueToTree(result.structuredContent());
             else {
                 var content = result.content().stream().filter(McpSchema.TextContent.class::isInstance)
@@ -65,18 +88,42 @@ public class McpGraphicsTools implements GraphicsTools {
                 body = mapper.readTree(content.text());
             }
         } catch (Exception e) {
-            disconnect(server);
-            // No mutation retry: a timeout may have happened after the server accepted the job.
-            throw new IllegalStateException(server + " MCP 暂不可用或请求结果未知，请检查本地服务", e);
+            throw new IllegalStateException("MCP 返回内容无法解析，请检查本地服务版本", e);
         }
-        if (!body.path("ok").asBoolean()) throw new IllegalStateException(body.path("error").asText("MCP 操作失败"));
-        if (!body.has("data")) throw new IllegalStateException("MCP 返回内容不完整");
+        if (body == null || !body.path("ok").isBoolean()) throw new IllegalStateException("MCP 返回内容不完整");
+        if (!body.path("ok").asBoolean()) {
+            String message = body.path("error").asText("MCP 操作失败");
+            if ("TEMPORARY_UNAVAILABLE".equals(body.path("error_code").asText()))
+                throw new GraphicsToolUnavailableException(message);
+            throw new IllegalStateException(message);
+        }
+        if (!body.hasNonNull("data")) throw new IllegalStateException("MCP 返回内容不完整");
         return body.get("data");
+    }
+
+    static boolean isTemporaryConnectionFailure(Throwable failure) {
+        boolean temporary = false;
+        var seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<Throwable, Boolean>());
+        for (Throwable cause = failure; cause != null && seen.add(cause); cause = cause.getCause()) {
+            if (cause instanceof InterruptedException || cause instanceof java.util.concurrent.CancellationException
+                    || cause instanceof JsonProcessingException) return false;
+            if (cause instanceof McpError error && error.getJsonRpcError() != null) return false;
+            if (cause instanceof WebClientResponseException response)
+                return Set.of(408, 429, 500, 502, 503, 504).contains(response.getStatusCode().value());
+            if (cause instanceof IOException || cause instanceof TimeoutException
+                    || cause instanceof WebClientRequestException || cause instanceof McpTransportException
+                    || cause instanceof McpTransportSessionClosedException || cause instanceof McpTransportSessionNotFoundException)
+                temporary = true;
+        }
+        return temporary;
     }
 
     private synchronized void disconnect(String name) {
         var client = clients.remove(name);
-        if (client != null) client.close();
+        if (client != null) {
+            try { client.close(); }
+            catch (RuntimeException ignored) { /* Preserve the original connection failure. */ }
+        }
     }
 
     @PreDestroy

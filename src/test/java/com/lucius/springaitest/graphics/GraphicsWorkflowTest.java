@@ -113,6 +113,78 @@ class GraphicsWorkflowTest {
         assertThatThrownBy(() -> properties.setCreativeMcpUrl("https://remote.example.org")).isInstanceOf(IllegalArgumentException.class);
     }
 
+    @Test void temporaryCreativePollFailureKeepsTheOriginalGeneration() throws Exception {
+        tools.faultTool = "creative_get_job"; tools.failures.set(2);
+        String id = workflow.submit("青瓷花瓶", "CONCEPT", null, "read-recover").path("id").asText();
+        var job = awaitTerminal(id);
+        assertThat(job.path("status").asText()).isEqualTo("CONCEPT_READY");
+        assertThat(job.path("connectionRetry").asInt()).isZero();
+        assertThat(tools.callCounts.get("creative_get_job").get()).isEqualTo(3);
+        assertThat(tools.references.get()).isEqualTo(1);
+        assertThat(tools.cancels.get()).isZero();
+    }
+
+    @Test void temporaryReconstructionPollFailureDoesNotStartTrainingAgain() throws Exception {
+        tools.faultTool = "webscan_get_status"; tools.failures.set(1);
+        String id = workflow.submit("青瓷花瓶", "THREE_D", null, "train-read-recover").path("id").asText();
+        assertThat(awaitTerminal(id).path("status").asText()).isEqualTo("READY");
+        assertThat(tools.callCounts.get("webscan_get_status").get()).isEqualTo(2);
+        assertThat(tools.references.get()).isEqualTo(1);
+        assertThat(tools.multiview.get()).isEqualTo(1);
+        assertThat(tools.starts.get()).isEqualTo(1);
+        assertThat(tools.cancels.get()).isZero();
+    }
+
+    @Test void resultFetchCanRecoverWithoutRegeneratingTheModel() throws Exception {
+        tools.faultTool = "webscan_get_result"; tools.failures.set(1);
+        String id = workflow.submit("青瓷花瓶", "THREE_D", null, "result-recover").path("id").asText();
+        assertThat(awaitTerminal(id).path("status").asText()).isEqualTo("READY");
+        assertThat(tools.callCounts.get("webscan_get_result").get()).isEqualTo(2);
+        assertThat(tools.starts.get()).isEqualTo(1);
+    }
+
+    @Test void persistentConnectionFailureExhaustsThreeReadsThenCleansUp() throws Exception {
+        tools.faultTool = "creative_get_job"; tools.failures.set(100);
+        String id = workflow.submit("青瓷花瓶", "CONCEPT", null, "read-exhausted").path("id").asText();
+        assertThat(awaitTerminal(id).path("status").asText()).isEqualTo("FAILED");
+        assertThat(tools.callCounts.get("creative_get_job").get()).isEqualTo(3);
+        assertThat(tools.references.get()).isEqualTo(1);
+        assertThat(tools.cancels.get()).isEqualTo(1);
+    }
+
+    @Test void permanentToolFailureIsNotRetried() throws Exception {
+        tools.faultTool = "creative_get_job"; tools.failures.set(100); tools.permanentFailure = true;
+        String id = workflow.submit("青瓷花瓶", "CONCEPT", null, "read-invalid").path("id").asText();
+        assertThat(awaitTerminal(id).path("status").asText()).isEqualTo("FAILED");
+        assertThat(tools.callCounts.get("creative_get_job").get()).isEqualTo(1);
+    }
+
+    @Test void cancellingDuringBackoffPreventsAnotherReadOrDownstreamStep() throws Exception {
+        tools.faultTool = "creative_get_job"; tools.failures.set(100);
+        properties.setPollInterval(Duration.ofSeconds(2));
+        String id = workflow.submit("青瓷花瓶", "THREE_D", null, "cancel-retry").path("id").asText();
+        long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+        while (store.get(id).path("connectionRetry").asInt() == 0 && System.nanoTime() < end) Thread.sleep(5);
+        assertThat(store.get(id).path("connectionRetry").asInt()).isEqualTo(1);
+        workflow.cancel(id);
+        assertThat(awaitTerminal(id).path("status").asText()).isEqualTo("CANCELLED");
+        assertThat(tools.callCounts.get("creative_get_job").get()).isEqualTo(1);
+        assertThat(tools.multiview.get()).isZero();
+        assertThat(tools.starts.get()).isZero();
+    }
+
+    @Test void retryBackoffHonorsTheExistingJobDeadline() throws Exception {
+        tools.faultTool = "creative_get_job"; tools.failures.set(100);
+        properties.setPollInterval(Duration.ofSeconds(2));
+        properties.setJobTimeout(Duration.ofSeconds(1));
+        String id = workflow.submit("青瓷花瓶", "CONCEPT", null, "retry-deadline").path("id").asText();
+        var job = awaitTerminal(id);
+        assertThat(job.path("status").asText()).isEqualTo("FAILED");
+        assertThat(job.path("message").asText()).contains("最长等待时间");
+        assertThat(tools.callCounts.get("creative_get_job").get()).isEqualTo(1);
+        assertThat(tools.cancels.get()).isEqualTo(1);
+    }
+
     private ObjectNode awaitTerminal(String id) throws Exception {
         long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         while (System.nanoTime() < end) {
@@ -126,16 +198,25 @@ class GraphicsWorkflowTest {
     class FakeTools implements GraphicsTools {
         AtomicInteger references = new AtomicInteger(), multiview = new AtomicInteger(), starts = new AtomicInteger(), cancels = new AtomicInteger();
         boolean rejectViews, failTraining, block, loseResponse;
+        String faultTool;
+        boolean permanentFailure;
+        AtomicInteger failures = new AtomicInteger();
+        java.util.concurrent.ConcurrentHashMap<String, AtomicInteger> callCounts = new java.util.concurrent.ConcurrentHashMap<>();
         CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
         final String ref = "1".repeat(32), views = "2".repeat(32), train = "3".repeat(32), session = "4".repeat(32);
         @Override public JsonNode call(String name, Map<String,Object> args) {
+            callCounts.computeIfAbsent(name, ignored -> new AtomicInteger()).incrementAndGet();
+            if (name.equals(faultTool) && failures.getAndDecrement() > 0) {
+                if (permanentFailure) throw new IllegalStateException("返回格式错误");
+                throw new GraphicsToolUnavailableException("连接暂时中断");
+            }
             var node = mapper.createObjectNode();
             switch (name) {
                 case "creative_health": return node.put("configured", true);
                 case "webscan_health": return node.put("available", true).put("brush_available", true);
                 case "creative_generate_reference":
                     references.incrementAndGet();
-                    if (loseResponse) throw new IllegalStateException("请求结果未知");
+                    if (loseResponse) throw new GraphicsToolUnavailableException("请求结果未知");
                     return node.put("id", ref);
                 case "creative_generate_multiview": multiview.incrementAndGet(); return node.put("id", views);
                 case "creative_get_job":
