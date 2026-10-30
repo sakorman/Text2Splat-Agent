@@ -1,0 +1,21 @@
+spring:
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+      - org.springframework.ai.vectorstore.redis.autoconfigure.RedisVectorStoreAutoConfiguration
+  ai:
+    model:
+      chat: none
+      embedding: none
+      image: none
+      audio:
+        transcription: none
+        speech: none
+server:
+  address: 127.0.0.1
+graphics:
+  data-dir: ${GRAPHICS_DATA_DIR:.graphics}
+  creative-mcp-url: ${CREATIVE_MCP_URL:http://127.0.0.1:8766}
+  webscan-mcp-url: ${WEBSCAN_MCP_URL:http://127.0.0.1:8767}
+  poll-interval: 2s
+  job-timeout: 2h

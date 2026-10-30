@@ -14,6 +14,7 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 @Component
+@org.springframework.context.annotation.Profile("!graphics")
 public class ChatMemoryImpl implements ChatMemory {
     @Autowired
     private StringRedisTemplate stringRedisTemplate;
@@ -50,6 +51,10 @@ public class ChatMemoryImpl implements ChatMemory {
     }
 
     @Override
+    public List<Message> get(String conversationId) {
+        return get(conversationId, 100);
+    }
+
     public List<Message> get(String conversationId, int lastN) {
         /*List<Message> messages=new ArrayList<>();
         String msg=stringRedisTemplate.opsForValue().get(RedisConstant.REDIS_MEMORY_ID+conversationId);

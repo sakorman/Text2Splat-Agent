@@ -1,6 +1,7 @@
 package com.lucius.springaitest;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.openai.OpenAiEmbeddingModel;
 import org.springframework.ai.reader.ExtractedTextFormatter;
@@ -16,6 +17,7 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import java.util.List;
 
 @SpringBootTest
+@EnabledIfEnvironmentVariable(named = "RUN_RAG_INTEGRATION", matches = "true")
 class SpringAiTestApplicationTests {
     @Autowired
     private VectorStore vectorStore;
@@ -24,7 +26,7 @@ class SpringAiTestApplicationTests {
 
     @Test
     public void testVectorStore() {
-        Resource resource = new FileSystemResource("C:\\Users\\86180\\Desktop\\4 计算机网络名词解释 (2).pdf");
+        Resource resource = new FileSystemResource(java.util.Objects.requireNonNull(System.getenv("RAG_TEST_PDF"), "Set RAG_TEST_PDF for this opt-in integration test"));
         // 1. 创建PDF的读取器
         PagePdfDocumentReader reader = new PagePdfDocumentReader(
                 resource, // 文件源

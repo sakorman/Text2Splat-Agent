@@ -31,3 +31,15 @@ build/
 
 ### VS Code ###
 .vscode/
+
+# Local credentials, generated artwork, model artifacts and runtimes
+.env
+.env.*
+!.env.example
+.graphics/
+.venv/
+__pycache__/
+.pytest_cache/
+*.egg-info/
+*.pyc
+.DS_Store

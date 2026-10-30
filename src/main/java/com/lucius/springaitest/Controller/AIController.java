@@ -11,7 +11,7 @@ import com.lucius.springaitest.VO.MessageVO;
 import jakarta.annotation.Resource;
 import org.json.JSONObject;
 import org.springframework.ai.chat.client.ChatClient;
-import org.springframework.ai.chat.client.advisor.AbstractChatMemoryAdvisor;
+import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.content.Media;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.reader.ExtractedTextFormatter;
@@ -40,6 +40,7 @@ import java.util.concurrent.Executors;
 
 @RestController
 @RequestMapping("/ai")
+@org.springframework.context.annotation.Profile("!graphics")
 public class AIController {
     @Resource(name = "chat")
     private ChatClient chatClient;
@@ -91,7 +92,7 @@ public class AIController {
             // 第一阶段：获取初始响应并生成任务列表
             chatClient.prompt(AIConstant.NekoPrompt)
                     .user(prompt)
-                    .advisors(a -> a.param(AbstractChatMemoryAdvisor.CHAT_MEMORY_CONVERSATION_ID_KEY, chatId))
+                    .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, chatId))
                     .stream()
                     .content()
                     .subscribe(
@@ -129,7 +130,7 @@ public class AIController {
             // 第一阶段：获取初始响应并生成任务列表
             ComputerNetWorkChatClient.prompt()
                     .user(prompt + " /no-think ")
-                    .advisors(a -> a.param(AbstractChatMemoryAdvisor.CHAT_MEMORY_CONVERSATION_ID_KEY, chatId))
+                    .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, chatId))
                     .stream()
                     .content()
                     .subscribe(
@@ -169,7 +170,7 @@ public class AIController {
                 // 第一阶段：获取初始响应并生成任务列表
                 DesignPattern.prompt()
                         .user(prompt)
-                        .advisors(a -> a.param(AbstractChatMemoryAdvisor.CHAT_MEMORY_CONVERSATION_ID_KEY, chatId))
+                        .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, chatId))
                         .stream()
                         .content()
                         .subscribe(
@@ -205,7 +206,7 @@ public class AIController {
                 // 第一阶段：获取初始响应并生成任务列表
                 OminiChatClient.prompt()
                         .user(p -> p.text(prompt).media(mediaList.toArray(Media[]::new)))
-                        .advisors(a -> a.param(AbstractChatMemoryAdvisor.CHAT_MEMORY_CONVERSATION_ID_KEY, chatId))
+                        .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, chatId))
                         .stream()
                         .content()
                         .subscribe(
@@ -249,7 +250,7 @@ public class AIController {
         //chatService.saveChatId(chatId,"chat");
         return GirlfriendSadChatClient.prompt()
                 .user(prompt)
-                .advisors(a -> a.param(AbstractChatMemoryAdvisor.CHAT_MEMORY_CONVERSATION_ID_KEY, chatId))
+                .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, chatId))
                 .stream()
                 .content();
     }
@@ -266,7 +267,7 @@ public class AIController {
             // 第一阶段：获取初始响应并生成任务列表
             AICoding.prompt()
                     .user(prompt)
-                    .advisors(a -> a.param(AbstractChatMemoryAdvisor.CHAT_MEMORY_CONVERSATION_ID_KEY, chatId))
+                    .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, chatId))
                     .stream()
                     .content()
                     .subscribe(
@@ -326,7 +327,7 @@ public class AIController {
 
         AICodingNext.prompt()
                 .user(currentTask)
-                .advisors(a -> a.param(AbstractChatMemoryAdvisor.CHAT_MEMORY_CONVERSATION_ID_KEY, chatId))
+                .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, chatId))
                 .stream()
                 .content()
                 .subscribe(

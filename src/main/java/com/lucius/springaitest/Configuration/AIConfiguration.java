@@ -25,6 +25,7 @@ import redis.clients.jedis.JedisPool;
 import redis.clients.jedis.JedisPooled;
 
 @Component
+@org.springframework.context.annotation.Profile("!graphics")
 public class AIConfiguration {
     @Autowired
     private CourseTools courseTools;
@@ -42,7 +43,7 @@ public class AIConfiguration {
         return ChatClient.builder(moddle)
                 .defaultSystem(AIConstant.DEFAULT).defaultAdvisors(
                         new SimpleLoggerAdvisor(),
-                        new MessageChatMemoryAdvisor(chatMemory)
+                        MessageChatMemoryAdvisor.builder(chatMemory).build()
                 ).build();
     }
 
@@ -51,7 +52,7 @@ public class AIConfiguration {
         return ChatClient.builder(moddle)
                 .defaultSystem(AIConstant.PROMPT_MAX).defaultAdvisors(
                         new SimpleLoggerAdvisor(),
-                        new MessageChatMemoryAdvisor(chatMemory)
+                        MessageChatMemoryAdvisor.builder(chatMemory).build()
                 ).build();
     }
 
@@ -62,7 +63,7 @@ public class AIConfiguration {
         return ChatClient.builder(model)
                 .defaultSystem(AIConstant.SERVER)
                 .defaultAdvisors(
-                        new MessageChatMemoryAdvisor(chatMemory),
+                        MessageChatMemoryAdvisor.builder(chatMemory).build(),
                         new SimpleLoggerAdvisor())
                 .defaultTools(courseTools)
                 .defaultTools(codeTools)
@@ -74,7 +75,7 @@ public class AIConfiguration {
         return ChatClient.builder(model)
                 .defaultSystem(AIConstant.GIRL_FIREND_PROMAX)
                 .defaultAdvisors(
-                        new MessageChatMemoryAdvisor(chatMemory),
+                        MessageChatMemoryAdvisor.builder(chatMemory).build(),
                         new SimpleLoggerAdvisor())
                 .build();
     }
@@ -84,7 +85,7 @@ public class AIConfiguration {
         return ChatClient.builder(model)
                 .defaultSystem(AIConstant.GIRLFRIEND)
                 .defaultAdvisors(
-                        new MessageChatMemoryAdvisor(chatMemory),
+                        MessageChatMemoryAdvisor.builder(chatMemory).build(),
                         new SimpleLoggerAdvisor())
                 .build();
     }
@@ -94,7 +95,7 @@ public class AIConfiguration {
         return ChatClient.builder(model)
                 .defaultSystem(AIConstant.COMPUTER_NETWORK)
                 .defaultAdvisors(
-                        new MessageChatMemoryAdvisor(chatMemory),
+                        MessageChatMemoryAdvisor.builder(chatMemory).build(),
                         new SimpleLoggerAdvisor())
                 .build();
     }
@@ -104,7 +105,7 @@ public class AIConfiguration {
         return ChatClient.builder(model)
                 .defaultSystem(AIConstant.GIRL_FRIEND_AI)
                 .defaultAdvisors(
-                        new MessageChatMemoryAdvisor(chatMemory),
+                        MessageChatMemoryAdvisor.builder(chatMemory).build(),
                         new SimpleLoggerAdvisor())
                 .build();
     }
@@ -114,7 +115,7 @@ public class AIConfiguration {
         return ChatClient.builder(model)
                 .defaultSystem(AIConstant.ENGLISH_PAPER)
                 .defaultAdvisors(
-                        new MessageChatMemoryAdvisor(chatMemory),
+                        MessageChatMemoryAdvisor.builder(chatMemory).build(),
                         new SimpleLoggerAdvisor())
                 .build();
     }
@@ -124,7 +125,7 @@ public class AIConfiguration {
         return ChatClient.builder(model)
                 .defaultSystem(AIConstant.DEFAULT)
                 .defaultAdvisors(
-                        new MessageChatMemoryAdvisor(chatMemory),
+                        MessageChatMemoryAdvisor.builder(chatMemory).build(),
                         new SimpleLoggerAdvisor())
                 .build();
     }
@@ -135,7 +136,7 @@ public class AIConfiguration {
                 .defaultOptions(ChatOptions.builder().model("qwen-omni-turbo-latest").build())
                 .defaultSystem(AIConstant.DEFAULT)
                 .defaultAdvisors(
-                        new MessageChatMemoryAdvisor(chatMemory),
+                        MessageChatMemoryAdvisor.builder(chatMemory).build(),
                         new SimpleLoggerAdvisor())
                 .build();
     }
@@ -145,7 +146,7 @@ public class AIConfiguration {
         return ChatClient.builder(model)
                 .defaultSystem(AIConstant.SQL_P)
                 .defaultAdvisors(
-                        new MessageChatMemoryAdvisor(chatMemory),
+                        MessageChatMemoryAdvisor.builder(chatMemory).build(),
                         new SimpleLoggerAdvisor())
                 .build();
     }
@@ -155,7 +156,7 @@ public class AIConfiguration {
         return ChatClient.builder(model)
                 .defaultSystem(AIConstant.LEARNING)
                 .defaultAdvisors(
-                        new MessageChatMemoryAdvisor(chatMemory),
+                        MessageChatMemoryAdvisor.builder(chatMemory).build(),
                         new SimpleLoggerAdvisor())
                 .build();
     }
@@ -165,7 +166,7 @@ public class AIConfiguration {
         return ChatClient.builder(model)
                 .defaultSystem(AIConstant.AI_CODE)
                 .defaultAdvisors(
-                        new MessageChatMemoryAdvisor(chatMemory),
+                        MessageChatMemoryAdvisor.builder(chatMemory).build(),
                         new SimpleLoggerAdvisor())
                 .build();
     }
@@ -175,7 +176,7 @@ public class AIConfiguration {
         return ChatClient.builder(model)
                 .defaultSystem(AIConstant.AI_CODE_NEXT)
                 .defaultAdvisors(
-                        new MessageChatMemoryAdvisor(chatMemory),
+                        MessageChatMemoryAdvisor.builder(chatMemory).build(),
                         new SimpleLoggerAdvisor())
                 .build();
     }
@@ -185,7 +186,7 @@ public class AIConfiguration {
         return ChatClient.builder(model)
                 .defaultSystem(AIConstant.DESIGN_PATTERN)
                 .defaultAdvisors(
-                        new MessageChatMemoryAdvisor(chatMemory),
+                        MessageChatMemoryAdvisor.builder(chatMemory).build(),
                         new SimpleLoggerAdvisor())
                 .build();
     }
