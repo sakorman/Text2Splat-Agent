@@ -6,46 +6,48 @@ const terminal = new Set([
   "FAILED",
   "CANCELLED",
 ]);
-const names = {
-  QUEUED: "等待开始",
-  PLANNING: "整理设计",
-  REFERENCE: "生成参考图",
-  MULTIVIEW: "生成候选视图",
-  IMPORTING: "准备重建",
-  RECONSTRUCTING: "本地重建",
-  VALIDATING: "检查产物",
-  READY: "3D 已完成",
-  CONCEPT_READY: "概念图已完成",
-  NEEDS_REVIEW: "需要调整",
-  FAILED: "未完成",
-  CANCELLING: "正在取消",
-  CANCELLED: "已取消",
+const stages = {
+  QUEUED: "正在准备生成…",
+  PLANNING: "正在理解你的描述…",
+  REFERENCE: "正在生成物件图像…",
+  MULTIVIEW: "正在生成和检查不同角度…",
+  IMPORTING: "正在准备构建模型…",
+  RECONSTRUCTING: "正在构建 3D 模型，可能需要一些时间。",
+  VALIDATING: "正在检查生成的模型…",
 };
-let current,
-  events,
-  health,
-  pendingRequest,
-  parentForNext,
-  history = [];
-const api = async (path, options) => {
+let current, events, pendingRequest;
+let submitting = false;
+let restoring = false;
+
+async function api(path, options) {
   const response = await fetch("/api/graphics" + path, options);
   const data = await response.json().catch(() => ({}));
   if (!response.ok)
-    throw new Error(data.message || `请求失败（${response.status}）`);
+    throw new Error(
+      data.message || `请求失败（${response.status}），请稍后重试。`,
+    );
   return data;
-};
-const showError = (message) => {
+}
+function showError(message) {
   $("form-error").textContent = message;
   $("form-error").hidden = !message;
-};
-function safeLocalUrl(value, asset = false) {
+}
+function updateControls() {
+  const running = current && !terminal.has(current.status);
+  $("prompt").disabled = submitting || restoring || !!running;
+  $("create-button").disabled = submitting || restoring || !!running;
+  $("create-button").textContent = submitting
+    ? "正在提交…"
+    : restoring
+      ? "正在恢复进度…"
+      : running
+        ? "正在生成…"
+        : "生成 3D 模型";
+}
+function safeLocalUrl(value) {
+  if (typeof value !== "string" || !value) return null;
   try {
     const url = new URL(value, location.origin);
-    if (asset)
-      return url.origin === location.origin &&
-        url.pathname.startsWith("/api/graphics/assets/")
-        ? url.href
-        : null;
     return url.protocol === "http:" &&
       ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)
       ? url.href
@@ -54,257 +56,133 @@ function safeLocalUrl(value, asset = false) {
     return null;
   }
 }
-function addLink(container, label, href, asset = false) {
-  const url = safeLocalUrl(href, asset);
+function addLink(label, href) {
+  const url = safeLocalUrl(href);
   if (!url) return;
   const link = document.createElement("a");
   link.textContent = label;
   link.href = url;
   link.target = "_blank";
   link.rel = "noopener noreferrer";
-  container.append(link);
+  $("result-actions").append(link);
+}
+function failureMessage(job) {
+  if (job.message?.includes("ZHIPU_API_KEY"))
+    return "图片生成服务尚未配置。请在本地 .env 中填写 ZHIPU_API_KEY，重启服务后再试。";
+  return job.message || "这次没有生成可用的 3D 模型，请调整描述后再试。";
 }
 function render(job) {
   current = job;
   const done = terminal.has(job.status);
-  $("work-title").textContent =
-    job.spec?.title ||
-    (job.prompt.length > 28 ? job.prompt.slice(0, 28) + "…" : job.prompt);
-  $("work-title").title = job.prompt;
-  $("work-kind").textContent =
-    job.mode === "THREE_D" ? "3D 生成尝试" : "概念设计";
-  $("status").textContent = names[job.status] || job.status;
-  $("status").className =
-    "status" +
-    (["READY", "CONCEPT_READY"].includes(job.status)
-      ? " success"
-      : ["FAILED", "NEEDS_REVIEW"].includes(job.status)
-        ? " error"
-        : "");
+  const failed = ["FAILED", "NEEDS_REVIEW"].includes(job.status);
+  const ready = job.status === "READY";
   $("progress-panel").hidden = false;
-  $("progress-title").textContent = names[job.status] || "正在处理";
-  $("progress-message").textContent = job.message || "";
+  $("progress-panel").dataset.state = ready
+    ? "done"
+    : failed
+      ? "error"
+      : done
+        ? "stopped"
+        : "running";
+  $("progress-title").textContent = ready
+    ? "3D 模型已生成"
+    : failed
+      ? "这次生成未完成"
+      : job.status === "CANCELLED"
+        ? "已取消生成"
+        : job.status === "CANCELLING"
+          ? "正在取消生成"
+          : job.status === "CONCEPT_READY"
+            ? "这个旧任务只生成了图片"
+            : "正在生成 3D 模型";
+  $("progress-message").textContent = ready
+    ? ""
+    : failed
+      ? failureMessage(job)
+      : job.status === "CONCEPT_READY"
+        ? "点击「生成 3D 模型」，用这段描述开始完整生成。"
+        : job.status === "CANCELLING"
+          ? "正在停止后续步骤；尚未确认停止时，可再次取消。"
+          : job.status === "CANCELLED"
+            ? "可以修改描述，再生成一次。"
+            : stages[job.status] || "正在处理，请稍候…";
+  $("progress-message").hidden = ready;
   $("cancel-button").hidden = done;
   $("cancel-button").textContent =
-    job.status === "CANCELLING" ? "重试取消" : "取消任务";
-  $("display-stage").classList.toggle("loading", !done);
-  const refUrl = safeLocalUrl(job.referenceAssets?.[0]?.url, true);
-  $("reference-image").hidden = !refUrl;
-  if (refUrl && $("reference-image").src !== refUrl)
-    $("reference-image").src = refUrl;
-  const viewerUrl =
-    job.status === "READY" ? safeLocalUrl(job.result?.viewer_url) : null;
+    job.status === "CANCELLING" ? "再次取消" : "取消生成";
+
+  const viewerUrl = ready ? safeLocalUrl(job.result?.viewer_url) : null;
+  const model = ready
+    ? job.result?.files?.find((file) => file.name === "gaussians.ply")
+    : null;
+  $("result").hidden = !ready;
   $("viewer").hidden = !viewerUrl;
   if (viewerUrl && $("viewer").src !== viewerUrl) $("viewer").src = viewerUrl;
   if (!viewerUrl) $("viewer").removeAttribute("src");
-  if (viewerUrl) $("reference-image").hidden = true;
-  $("empty-state").hidden = !!refUrl || !!viewerUrl;
-  $("stage-caption").hidden = !refUrl || !!viewerUrl;
-  const stage =
-    {
-      QUEUED: 0,
-      PLANNING: 0,
-      REFERENCE: 1,
-      MULTIVIEW: 2,
-      IMPORTING: 2,
-      RECONSTRUCTING: 3,
-      VALIDATING: 4,
-      READY: 5,
-      CONCEPT_READY: 2,
-    }[job.status] ?? -1;
-  $("steps").hidden = done && !["READY", "CONCEPT_READY"].includes(job.status);
-  [...$("steps").children].forEach((li, index) => {
-    li.hidden = job.mode === "CONCEPT" && index > 1;
-    li.className = index < stage ? "done" : index === stage ? "current" : "";
-  });
-  const assets = job.viewAssets || [];
-  $("contact-sheet").hidden = !assets.length;
-  $("view-count").textContent = `${assets.length} / 12`;
-  const signature = assets.map((a) => a.url).join("|");
-  if ($("view-grid").dataset.signature !== signature) {
-    $("view-grid").dataset.signature = signature;
-    $("view-grid").replaceChildren();
-    assets.forEach((asset, i) => {
-      const url = safeLocalUrl(asset.url, true);
-      if (!url) return;
-      const a = document.createElement("a");
-      a.href = url;
-      a.target = "_blank";
-      a.rel = "noopener";
-      const img = document.createElement("img");
-      img.src = url;
-      img.alt = `候选视图 ${i + 1}`;
-      img.loading = "lazy";
-      const caption = document.createElement("span");
-      caption.textContent = `视图 ${i + 1}`;
-      a.append(img, caption);
-      $("view-grid").append(a);
-    });
-  }
-  const actions = $("result-actions");
-  actions.replaceChildren();
-  actions.hidden = !done;
-  if (done) {
-    if (viewerUrl) addLink(actions, "打开 3D 展厅", viewerUrl);
-    if (refUrl) addLink(actions, "查看参考图", refUrl, true);
-    for (const file of job.result?.files || [])
-      addLink(actions, `下载 ${file.name}`, file.url);
-    const revise = document.createElement("button");
-    revise.type = "button";
-    revise.textContent = "修改描述，创建新版本";
-    revise.addEventListener("click", () => {
-      parentForNext = job.id;
-      $("prompt").value = job.prompt;
-      $("prompt").focus();
-      $("prompt").scrollIntoView({ block: "center", behavior: "smooth" });
-    });
-    actions.append(revise);
-  }
+  $("result-actions").replaceChildren();
+  if (model) addLink("下载模型", model.url);
+  if (viewerUrl) addLink("打开完整预览", viewerUrl);
+  $("result").querySelector("p").textContent = viewerUrl
+    ? "拖动旋转，滚动缩放"
+    : "预览暂不可用，可下载模型查看。";
   if (done) {
     events?.close();
     $("stream-note").hidden = true;
   }
+  updateControls();
 }
 function watch(id) {
   events?.close();
-  events = new EventSource(`/api/graphics/jobs/${id}/events`);
-  events.addEventListener("progress", (event) => {
+  const stream = new EventSource(`/api/graphics/jobs/${id}/events`);
+  events = stream;
+  stream.addEventListener("progress", (event) => {
     if (current?.id !== id) return;
     try {
       const job = JSON.parse(event.data);
       $("stream-note").hidden = true;
       render(job);
-      if (terminal.has(job.status)) loadHistory();
     } catch {
       $("stream-note").hidden = false;
-      $("stream-note").textContent = "进度解析失败，请刷新作品。";
+      $("stream-note").textContent =
+        "进度暂时不可用，请刷新页面恢复。刷新不会重复生成。";
     }
   });
-  events.onerror = () => {
-    if (current && !terminal.has(current.status)) {
+  stream.onerror = () => {
+    if (current?.id === id && !terminal.has(current.status)) {
       $("stream-note").hidden = false;
       $("stream-note").textContent =
-        "进度连接已断开，正在重连。刷新页面不会重复生成。";
+        "进度连接中断，正在重连。刷新页面也可恢复进度。";
     }
   };
 }
-async function select(id) {
-  try {
-    events?.close();
-    const job = await api("/jobs/" + id);
-    render(job);
-    localStorage.setItem("graphics.current", id);
-    window.history.replaceState(null, "", `?job=${id}`);
-    if (!terminal.has(job.status)) watch(id);
-    renderHistory();
-  } catch (error) {
-    showError(error.message);
-  }
+function openJob(job) {
+  events?.close();
+  $("prompt").value = job.prompt;
+  window.history.replaceState(null, "", `?job=${job.id}`);
+  render(job);
+  if (!terminal.has(job.status)) watch(job.id);
 }
-function renderHistory() {
-  const list = $("history-list");
-  list.replaceChildren();
-  if (!history.length) {
-    const p = document.createElement("p");
-    p.className = "muted";
-    p.textContent = "还没有作品，从上面的描述开始。";
-    list.append(p);
-    return;
-  }
-  for (const job of history) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className =
-      "history-item" + (current?.id === job.id ? " active" : "");
-    const url = safeLocalUrl(job.referenceAssets?.[0]?.url, true);
-    if (url) {
-      const img = document.createElement("img");
-      img.src = url;
-      img.alt = "";
-      img.loading = "lazy";
-      button.append(img);
-    }
-    const copy = document.createElement("span");
-    copy.className = "history-copy";
-    const title = document.createElement("strong");
-    title.textContent = job.spec?.title || job.prompt;
-    const status = document.createElement("small");
-    status.textContent = `${names[job.status] || job.status}　${new Date(job.createdAt).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}`;
-    copy.append(title, status);
-    button.append(copy);
-    button.addEventListener("click", () => select(job.id));
-    list.append(button);
-  }
-}
-async function loadHistory() {
-  try {
-    history = await api("/jobs");
-    renderHistory();
-  } catch (error) {
-    showError(error.message);
-  }
-}
-async function loadHealth() {
-  $("refresh-health").disabled = true;
-  try {
-    health = await api("/health");
-    const creative = health.creative || {},
-      scan = health.webscan || {};
-    $("connection-text").textContent = creative.configured
-      ? scan.brush_available
-        ? "生成与重建已就绪"
-        : "图片生成已就绪"
-      : "需要配置生成服务";
-    $("refresh-health").classList.toggle("ready", !!creative.configured);
-    const details = $("service-details");
-    details.replaceChildren();
-    for (const text of [
-      creative.configured
-        ? `图片模型：${creative.image_model}`
-        : creative.message || "尚未设置 ZHIPU_API_KEY",
-      scan.brush_available
-        ? "本地 Brush 已就绪"
-        : scan.message || "web-scan / Brush 尚未就绪",
-      creative.image_provider === "seedream"
-        ? "当前选择 Seedream，图片生成会按供应商规则计费。"
-        : "当前选择 CogView 免费模型，视图生成属于实验流程。",
-    ]) {
-      const p = document.createElement("p");
-      p.textContent = text;
-      details.append(p);
-    }
-    updateMode();
-  } catch (error) {
-    $("connection-text").textContent = "本地 Agent 未连接";
-    showError(error.message);
-  } finally {
-    $("refresh-health").disabled = false;
-  }
-}
-function updateMode() {
-  const mode = document.querySelector('input[name="mode"]:checked').value;
-  $("create-button").firstChild.textContent =
-    mode === "CONCEPT" ? "生成概念图 " : "生成视图并尝试重建 ";
-  $("mode-note").textContent =
-    mode === "THREE_D"
-      ? "候选视图可能不一致；检查或重建失败时保留图片供调整。"
-      : health?.creative?.image_provider === "seedream"
-        ? "当前使用 Seedream，图片生成会计费。"
-        : "默认使用免费模型。实际额度以供应商账号为准。";
-}
+$("prompt").addEventListener("input", () => {
+  $("prompt").setCustomValidity("");
+  showError("");
+});
 $("create-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (submitting || restoring || (current && !terminal.has(current.status)))
+    return;
+  const prompt = $("prompt").value.trim();
+  if (prompt.length < 2) {
+    $("prompt").setCustomValidity("请至少输入两个字，描述你想生成的物件。");
+    $("prompt").reportValidity();
+    return;
+  }
   showError("");
-  $("create-button").disabled = true;
-  const body = {
-    prompt: $("prompt").value.trim(),
-    mode: document.querySelector('input[name="mode"]:checked').value,
-  };
-  if (parentForNext) body.parentJobId = parentForNext;
-  const serialized = JSON.stringify(body);
-  // Reuse the key after an ambiguous network failure; changed input gets a new version.
-  if (!pendingRequest || pendingRequest.body !== serialized)
-    pendingRequest = { body: serialized, key: crypto.randomUUID() };
+  submitting = true;
+  updateControls();
+  const body = JSON.stringify({ prompt, mode: "THREE_D" });
+  // Retry an ambiguous submission with the same key; never start duplicate generation.
+  if (!pendingRequest || pendingRequest.body !== body)
+    pendingRequest = { body, key: crypto.randomUUID() };
   try {
     const job = await api("/jobs", {
       method: "POST",
@@ -312,21 +190,25 @@ $("create-form").addEventListener("submit", async (event) => {
         "Content-Type": "application/json",
         "Idempotency-Key": pendingRequest.key,
       },
-      body: serialized,
+      body,
     });
     pendingRequest = null;
-    parentForNext = null;
-    await select(job.id);
-    await loadHistory();
+    openJob(job);
   } catch (error) {
-    showError(error.message);
+    showError(
+      error instanceof TypeError
+        ? "连接失败，请检查本地服务后重试。"
+        : error.message,
+    );
   } finally {
-    $("create-button").disabled = false;
+    submitting = false;
+    updateControls();
   }
 });
 $("cancel-button").addEventListener("click", async () => {
-  if (!current) return;
+  if (!current || terminal.has(current.status)) return;
   $("cancel-button").disabled = true;
+  showError("");
   try {
     render(await api(`/jobs/${current.id}/cancel`, { method: "POST" }));
   } catch (error) {
@@ -335,21 +217,16 @@ $("cancel-button").addEventListener("click", async () => {
     $("cancel-button").disabled = false;
   }
 });
-document.querySelectorAll("[data-example]").forEach((button) =>
-  button.addEventListener("click", () => {
-    parentForNext = null;
-    $("prompt").value = button.dataset.example;
-    $("prompt").focus();
-  }),
-);
-document
-  .querySelectorAll('input[name="mode"]')
-  .forEach((radio) => radio.addEventListener("change", updateMode));
-$("refresh-health").addEventListener("click", loadHealth);
-$("refresh-history").addEventListener("click", loadHistory);
-await loadHistory();
-const selected =
-  new URLSearchParams(location.search).get("job") ||
-  localStorage.getItem("graphics.current");
-if (selected && /^[a-f0-9]{32}$/.test(selected)) await select(selected);
-loadHealth();
+const selected = new URLSearchParams(location.search).get("job");
+if (selected && /^[a-f0-9]{32}$/.test(selected)) {
+  restoring = true;
+  updateControls();
+  try {
+    openJob(await api("/jobs/" + selected));
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    restoring = false;
+    updateControls();
+  }
+}

@@ -33,6 +33,8 @@ public class LocalGraphicsFilter extends OncePerRequestFilter {
         response.setHeader("Referrer-Policy", "no-referrer");
         response.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-src http://127.0.0.1:* http://localhost:*; object-src 'none'; base-uri 'self'; frame-ancestors 'self'");
         if (request.getRequestURI().startsWith("/api/graphics")) response.setHeader("Cache-Control", "no-store");
+        // Revalidate unversioned UI files so a restarted local app cannot serve stale controls.
+        else if (request.getRequestURI().startsWith("/graphics")) response.setHeader("Cache-Control", "no-cache");
         chain.doFilter(request, response);
     }
 }
