@@ -68,6 +68,13 @@ public class GraphicsJobStore {
         catch (IOException e) { throw new IllegalStateException("无法读取本地任务记录", e); }
     }
 
+    public synchronized ObjectNode getByRequestKey(String key) {
+        if (key == null || !key.matches("[a-zA-Z0-9._:-]{1,160}"))
+            throw new IllegalArgumentException("请求标识格式错误");
+        return list().stream().filter(job -> job.path("requestKey").asText().equals(key)).findFirst()
+                .orElseThrow(() -> new java.util.NoSuchElementException("尚未找到这个提交对应的任务"));
+    }
+
     public synchronized List<ObjectNode> list() {
         try (var files = Files.list(directory)) {
             return files.filter(p -> p.getFileName().toString().matches("[a-f0-9]{32}\\.json"))

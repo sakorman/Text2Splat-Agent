@@ -53,6 +53,9 @@ public class GraphicsController {
     @GetMapping("/jobs/{id}")
     public ObjectNode get(@PathVariable String id) { return store.get(id); }
 
+    @GetMapping("/requests/{key}")
+    public ObjectNode getRequest(@PathVariable String key) { return store.getByRequestKey(key); }
+
     @PostMapping("/jobs/{id}/cancel")
     public ObjectNode cancel(@PathVariable String id) { return workflow.cancel(id); }
 
