@@ -55,7 +55,7 @@ try:
         spawn([sys.executable, "-m", "graphics_mcp.server", kind, "--port", str(urlsplit(url).port)])
     java = str(Path(os.environ["JAVA_HOME"]) / "bin/java") if os.getenv("JAVA_HOME") else shutil.which("java")
     spawn([java, "-jar", str(ROOT / "target/SpringAITest-0.0.1-SNAPSHOT.jar"), "--spring.profiles.active=graphics"])
-    print(f"\n造物间启动中：http://127.0.0.1:{os.getenv('PORT', '8080')}/graphics/\n按 Ctrl-C 停止本次启动的服务。\n", flush=True)
+    print(f"\nText2Splat Agent · 造物方舟启动中：http://127.0.0.1:{os.getenv('PORT', '8080')}/graphics/\n按 Ctrl-C 停止本次启动的服务。\n", flush=True)
     while not stopping:
         if any(process.poll() is not None for process in children):
             print("一个子服务已退出，正在停止本次启动的其余服务。请查看上方错误。", flush=True)

@@ -39,7 +39,7 @@ public class McpGraphicsTools implements GraphicsTools {
                 .endpoint("/mcp").openConnectionOnStartup(false).build();
         var client = McpClient.sync(transport).requestTimeout(Duration.ofSeconds(90))
                 .initializationTimeout(Duration.ofSeconds(5))
-                .clientInfo(new McpSchema.Implementation("graphics-agent", "0.1.0")).build();
+                .clientInfo(new McpSchema.Implementation("text2splat-agent", "0.1.0")).build();
         try {
             client.initialize();
             clients.put(server, client);

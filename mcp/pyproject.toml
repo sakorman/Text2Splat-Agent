@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "graphics-agent-mcp"
 version = "0.1.0"
-description = "Local creative and web-scan MCP adapters for SpringAI-Agent"
+description = "Local creative and web-scan MCP adapters for Text2Splat Agent"
 requires-python = ">=3.11"
 dependencies = ["mcp>=1.28,<2", "httpx>=0.28,<1", "pillow>=11,<13", "python-dotenv>=1,<2"]
 

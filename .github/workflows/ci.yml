@@ -1,4 +1,4 @@
-name: Graphics Agent checks
+name: Text2Splat Agent checks
 on: [push, pull_request]
 permissions:
   contents: read
