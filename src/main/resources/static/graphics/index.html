@@ -3,203 +3,76 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <meta name="theme-color" content="#edf3f7" />
+    <meta name="theme-color" content="#f5f8fa" />
     <title>Text2Splat Agent · 造物方舟</title>
     <meta
       name="description"
-      content="文字驱动的本地 3DGS Agent：从物件描述生成图片，通过内置 MCP 调用本机重建，制作可旋转的文创展品。"
+      content="输入一段描述，生成可以旋转查看的 3D 模型。"
     />
     <link rel="stylesheet" href="./studio.css" />
     <script type="module" src="./studio.js"></script>
   </head>
   <body>
     <header class="masthead">
-      <a class="brand" href="./"
-        ><span class="brand-mark" aria-hidden="true">◒</span> 造物方舟
-        <span class="brand-note">文字驱动的本地 3DGS Agent</span></a
-      >
-      <button class="connection" id="refresh-health" type="button">
-        <span class="dot"></span><span id="connection-text">检查本地服务</span>
-      </button>
+      <span class="brand">造物方舟</span>
+      <span class="brand-note">Text2Splat Agent</span>
     </header>
     <main class="workspace">
-      <aside class="compose">
-        <div class="intro">
-          <p class="studio-note">Text2Splat Agent · 从文字到立体</p>
-          <h1>描述你的<br />下一件作品</h1>
-          <p>让一句话成为图像，再尝试把它变成可以转动的展品。</p>
-        </div>
+      <section class="compose" aria-labelledby="page-title">
+        <h1 id="page-title">让想法立起来</h1>
+        <p class="intro">输入一段描述，生成一个 3D 模型。</p>
         <form id="create-form">
-          <label class="field-label" for="prompt">物件描述</label>
-          <textarea
-            id="prompt"
-            name="prompt"
-            minlength="2"
-            maxlength="2000"
-            required
-            rows="6"
-            placeholder="一只青瓷小鸟香插，圆润的身体，浅青色哑光釉面，翅膀上有细密羽纹……"
-          ></textarea>
-          <div class="examples" aria-label="试试这些描述">
-            <button
-              type="button"
-              data-example="一只青瓷小鸟香插，圆润的身体，浅青色哑光釉面，翅膀有细密羽纹，背部一个小插孔"
-            >
-              青瓷小鸟
-            </button>
-            <button
-              type="button"
-              data-example="一个敦煌配色的陶瓷花瓶，矮胖的瓶身，窄口，土黄底色，蓝绿色卷草纹，哑光表面"
-            >
-              卷草纹花瓶
-            </button>
-            <button
-              type="button"
-              data-example="一个熊猫木雕摆件，坐姿，圆形耳朵，黑白相间，表面带细腻木纹，简洁完整的轮廓"
-            >
-              熊猫木雕
-            </button>
+          <label class="sr-only" for="prompt">描述你想生成的物件</label>
+          <div class="prompt-box">
+            <textarea
+              id="prompt"
+              name="prompt"
+              minlength="2"
+              maxlength="2000"
+              required
+              rows="5"
+              placeholder="描述你想生成的物件，比如：一只圆润的青瓷小鸟，浅青色釉面，翅膀带有细密的羽纹。"
+            ></textarea>
+            <div class="form-actions">
+              <button class="primary" id="create-button" type="submit">
+                生成 3D 模型
+              </button>
+            </div>
           </div>
-          <fieldset class="mode-picker">
-            <legend>这次想做到哪一步？</legend>
-            <label
-              ><input type="radio" name="mode" value="CONCEPT" checked /><span
-                ><strong>先看概念图</strong
-                ><small>生成一张图，确认设计方向</small></span
-              ></label
-            >
-            <label
-              ><input type="radio" name="mode" value="THREE_D" /><span
-                ><strong>尝试生成 3D</strong
-                ><small>生成 12 张视图，交给本机重建</small></span
-              ></label
-            >
-          </fieldset>
-          <p class="mode-note" id="mode-note">
-            默认使用免费模型。实际额度以供应商账号为准。
-          </p>
-          <button class="primary" id="create-button" type="submit">
-            生成概念图 <span aria-hidden="true">＋</span>
-          </button>
           <p class="form-error" id="form-error" role="alert" hidden></p>
         </form>
-        <details class="setup">
-          <summary>服务与配置</summary>
-          <div id="service-details">正在读取配置…</div>
-          <p>
-            密钥保存在本地 <code>.env</code>，不需要在页面中填写。启动方式见仓库
-            README。
-          </p>
-        </details>
-        <section class="history">
-          <div class="section-title">
-            <h2>最近的作品</h2>
-            <button type="button" id="refresh-history" class="text-button">
-              刷新
-            </button>
-          </div>
-          <div id="history-list">
-            <p class="muted">还没有作品，从上面的描述开始。</p>
-          </div>
-        </section>
-      </aside>
+      </section>
 
-      <section class="exhibit" aria-label="作品预览">
-        <div class="exhibit-heading">
-          <div>
-            <p class="studio-note" id="work-kind">你的展台</p>
-            <h2 id="work-title">等待第一件作品</h2>
-          </div>
-          <span id="status" class="status">尚未开始</span>
-        </div>
-        <div class="stage" id="display-stage">
-          <div class="empty-state" id="empty-state">
-            <svg class="empty-object" viewBox="0 0 420 330" aria-hidden="true">
-              <ellipse cx="210" cy="288" rx="146" ry="17" fill="#d6e0e8" />
-              <path d="M76 274L210 218L344 274L210 326Z" fill="#e6edf2" />
-              <path d="M76 274V285L210 337V326Z" fill="#cfdae4" />
-              <path d="M210 326V337L344 285V274Z" fill="#bbcbd9" />
-              <path
-                d="M187 61C181 91 180 112 155 146C124 187 134 246 174 267C199 281 233 280 256 264C291 240 294 190 268 152C242 114 238 90 234 61Z"
-                fill="#e2eaf0"
-                stroke="#7e99ac"
-                stroke-width="1.5"
-                stroke-dasharray="5 5"
-              />
-              <ellipse
-                cx="210"
-                cy="61"
-                rx="24"
-                ry="7"
-                fill="#edf3f7"
-                stroke="#7e99ac"
-                stroke-width="1.5"
-              />
-              <path
-                d="M147 166C185 184 236 184 277 165M139 202C183 220 242 221 286 200M155 243C185 257 239 257 268 242"
-                fill="none"
-                stroke="#adbfcd"
-                stroke-dasharray="3 5"
-              />
-              <path
-                d="M210 70V274M193 73C175 133 165 216 190 273M226 73C248 146 257 213 230 273"
-                stroke="#adbfcd"
-                fill="none"
-                stroke-dasharray="3 5"
-              />
-            </svg>
-            <h3>给想象一个形状</h3>
-            <p>
-              写下物件、材质和细节。<br />生成的参考图与 3D 展品会出现在这里。
-            </p>
-          </div>
-          <img id="reference-image" alt="生成的物件参考图" hidden />
-          <iframe
-            id="viewer"
-            title="本地 3D 展品，可拖动旋转"
-            hidden
-            allow="fullscreen"
-          ></iframe>
-          <div class="stage-caption" id="stage-caption" hidden>设计参考图</div>
-        </div>
-        <section
-          class="progress-panel"
-          id="progress-panel"
-          hidden
-          aria-live="polite"
-        >
-          <div class="progress-heading">
-            <strong id="progress-title">准备生成</strong
-            ><button
-              id="cancel-button"
-              class="text-button danger"
-              type="button"
-            >
-              取消任务
-            </button>
-          </div>
-          <ol class="steps" id="steps">
-            <li>整理设计</li>
-            <li>生成图片</li>
-            <li>检查视图</li>
-            <li>本地重建</li>
-            <li>交付展品</li>
-          </ol>
+      <section
+        class="progress"
+        id="progress-panel"
+        hidden
+        aria-label="生成进度"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        <span class="progress-mark" aria-hidden="true"></span>
+        <div class="progress-copy">
+          <h2 id="progress-title"></h2>
           <p id="progress-message"></p>
-          <p class="muted" id="stream-note" hidden></p>
-        </section>
-        <div class="result-actions" id="result-actions" hidden></div>
-        <section class="contact-sheet" id="contact-sheet" hidden>
-          <div class="section-title">
-            <h2>候选视图</h2>
-            <span id="view-count">0 / 12</span>
-          </div>
-          <p class="muted">这些图像由 AI 生成；实际相机位置由重建程序估计。</p>
-          <div id="view-grid" class="view-grid"></div>
-        </section>
-        <footer class="exhibit-footer">
-          <span>图片由 AI 生成</span><span>3D 计算留在你的电脑上</span>
-        </footer>
+          <p id="stream-note" hidden></p>
+        </div>
+        <button id="cancel-button" class="text-button" type="button">
+          取消生成
+        </button>
+      </section>
+
+      <section class="result" id="result" hidden aria-label="生成的 3D 模型">
+        <iframe
+          id="viewer"
+          title="3D 模型，可拖动旋转"
+          allow="fullscreen"
+          hidden
+        ></iframe>
+        <div class="result-footer">
+          <p>拖动旋转，滚动缩放</p>
+          <div id="result-actions" class="result-actions"></div>
+        </div>
       </section>
     </main>
   </body>

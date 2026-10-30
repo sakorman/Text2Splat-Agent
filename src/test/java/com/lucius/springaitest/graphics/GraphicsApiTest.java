@@ -34,6 +34,7 @@ class GraphicsApiTest {
         assertThat(page.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(page.getBody()).contains("Text2Splat Agent").contains("造物方舟").contains("studio.js");
         assertThat(page.getHeaders().getFirst("X-Content-Type-Options")).isEqualTo("nosniff");
+        assertThat(page.getHeaders().getCacheControl()).isEqualTo("no-cache");
     }
     @Test void invalidInputAndCrossOriginMutationAreRejected() {
         var bad = http.postForEntity("/api/graphics/jobs", Map.of("prompt", "", "mode", "THREE_D"), Map.class);
