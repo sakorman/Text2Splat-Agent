@@ -13,7 +13,7 @@
 - 默认免费模型：`glm-4.7-flash` 整理设计、`cogview-3-flash` 生图、`glm-4.6v-flash` 检查外观。
 - 可选 Seedream 4.0 参考图约束生成，必须通过本地配置显式开启付费，不自动降级到付费服务。
 - 接入已有 [web-scan](https://github.com/sakorman/web-scan)：导入图片、冻结采集、SfM、Brush 本地 GPU 训练、预览与下载。
-- 异步任务、本地持久化、请求幂等、取消传播、重启中断恢复、丢失提交响应后的任务查询。
+- 异步任务、本地持久化、请求幂等、取消传播、重启中断恢复、丢失提交响应后的任务查询；进度连接短暂中断时有限重试只读查询。
 - 新的 `graphics` 启动模式不依赖 MySQL、Redis、Ollama；原聊天模块仍可使用默认模式运行。
 
 ## 快速启动
@@ -109,6 +109,8 @@ curl http://127.0.0.1:8080/api/graphics/jobs \
 | GET | `/api/graphics/assets/{setId}/{name}` | 本地生成的 PNG，仅允许受控 ID 与文件名 |
 
 状态包括 `QUEUED / PLANNING / REFERENCE / MULTIVIEW / IMPORTING / RECONSTRUCTING / VALIDATING / READY`，以及 `CONCEPT_READY / NEEDS_REVIEW / FAILED / CANCELLING / CANCELLED`。
+
+生成进度、重建进度和产物查询遇到明确的临时连接故障时，每次查询最多尝试 3 次，默认等待 2 秒、4 秒后重试。不会重发生图、图片导入、训练启动或取消请求，也不会重试参数错误、无效返回内容或质量检查失败。退避期间可以取消，并检查原任务总超时；单次 MCP 调用仍受既有 90 秒请求超时限制。
 
 取消无法撤回已发送给供应商的生成请求；任务不会在晚到的结果抵达后变成成功。下游停止结果无法确认时保留 `CANCELLING`，恢复服务后可再次取消。重启会查询并取消遗留任务，不自动续训或重发生成请求。
 

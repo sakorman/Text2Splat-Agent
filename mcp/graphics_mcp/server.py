@@ -7,7 +7,7 @@ from mcp.server.fastmcp import FastMCP
 from .creative import Creative
 from .settings import Settings
 from .store import Store
-from .webscan import Webscan
+from .webscan import Webscan, TemporaryWebscanError
 
 
 def create_server(kind, settings, port):
@@ -20,6 +20,8 @@ def create_server(kind, settings, port):
         def safe(*args, **kwargs):
             try:
                 return {"ok": True, "data": fn(*args, **kwargs)}
+            except TemporaryWebscanError as exc:
+                return {"ok": False, "error": str(exc)[:600], "error_code": "TEMPORARY_UNAVAILABLE"}
             except ValueError as exc:
                 return {"ok": False, "error": str(exc)[:600]}
             except Exception:

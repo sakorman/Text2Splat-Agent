@@ -6,7 +6,9 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import java.time.Instant;
+import java.time.Duration;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -22,6 +24,7 @@ public class GraphicsWorkflow {
     private final ObjectMapper mapper;
     private final ExecutorService worker = Executors.newSingleThreadExecutor(r -> new Thread(r, "graphics-workflow"));
     private static class Cancelled extends RuntimeException {}
+    private static final Set<String> RETRYABLE_READS = Set.of("creative_get_job", "webscan_get_status", "webscan_get_result");
     private static class ReviewRequired extends RuntimeException {
         ReviewRequired(String message) { super(message); }
     }
@@ -111,7 +114,7 @@ public class GraphicsWorkflow {
             while (true) {
                 checkpoint(id);
                 checkDeadline(deadline);
-                JsonNode status = tools.call("webscan_get_status", Map.of("job_id", jid));
+                JsonNode status = readWithRecovery(id, "webscan_get_status", Map.of("job_id", jid), deadline);
                 store.update(id, j -> {
                     j.put("stage", status.path("stage").asText()); j.put("message", status.path("message").asText());
                     j.set("reconstruction", status);
@@ -124,7 +127,7 @@ public class GraphicsWorkflow {
             }
             checkpoint(id);
             stage(id, "VALIDATING", "export", "正在检查 3D 产物");
-            var result = tools.call("webscan_get_result", Map.of("job_id", jid));
+            var result = readWithRecovery(id, "webscan_get_result", Map.of("job_id", jid), deadline);
             checkpoint(id);
             store.update(id, j -> { j.set("result", result); j.put("status", "READY").put("stage", "complete").put("message", "3D 展品已生成，可旋转查看并下载"); });
         } catch (Cancelled e) {
@@ -143,7 +146,7 @@ public class GraphicsWorkflow {
         while (true) {
             checkpoint(id);
             checkDeadline(deadline);
-            JsonNode state = tools.call("creative_get_job", Map.of("job_id", childId));
+            JsonNode state = readWithRecovery(id, "creative_get_job", Map.of("job_id", childId), deadline);
             store.update(id, j -> {
                 String phase = state.path("stage").asText();
                 j.put("stage", phase).put("message", state.path("message").asText());
@@ -157,6 +160,34 @@ public class GraphicsWorkflow {
                 case "needs_review": throw new ReviewRequired(state.path("message").asText());
                 case "cancelled": throw new Cancelled();
                 default: pause();
+            }
+        }
+    }
+
+    private JsonNode readWithRecovery(String id, String tool, Map<String, Object> arguments, Instant deadline) {
+        if (!RETRYABLE_READS.contains(tool)) throw new IllegalArgumentException("只有任务状态和结果查询可以自动重试");
+        for (int attempt = 0; ; attempt++) {
+            checkpoint(id);
+            checkDeadline(deadline);
+            try {
+                JsonNode result = tools.call(tool, arguments);
+                checkpoint(id);
+                checkDeadline(deadline);
+                if (attempt > 0) store.update(id, job -> job.put("connectionRetry", 0));
+                return result;
+            } catch (GraphicsToolUnavailableException e) {
+                if (attempt >= 2) throw e;
+                int retry = attempt + 1;
+                store.update(id, job -> job.put("connectionRetry", retry)
+                        .put("message", "进度连接暂时中断，正在恢复；不会重新生成图片或启动重建"));
+                long delay = Math.min(5000, properties.getPollInterval().toMillis()) * (1L << attempt);
+                Instant resume = Instant.now().plusMillis(Math.min(5000, Math.max(1, delay)));
+                while (Instant.now().isBefore(resume)) {
+                    checkpoint(id);
+                    checkDeadline(deadline);
+                    try { Thread.sleep(Math.min(100, Math.max(1, Duration.between(Instant.now(), resume).toMillis()))); }
+                    catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); throw new Cancelled(); }
+                }
             }
         }
     }

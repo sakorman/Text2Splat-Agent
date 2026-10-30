@@ -114,7 +114,9 @@ function render(job) {
           ? "正在停止后续步骤；尚未确认停止时，可再次取消。"
           : job.status === "CANCELLED"
             ? "可以修改描述，再生成一次。"
-            : stages[job.status] || "正在处理，请稍候…";
+            : job.connectionRetry > 0
+              ? "进度连接暂时中断，正在恢复；无需重新生成。"
+              : stages[job.status] || "正在处理，请稍候…";
   $("progress-message").hidden = ready;
   $("cancel-button").hidden = done;
   $("cancel-button").textContent =

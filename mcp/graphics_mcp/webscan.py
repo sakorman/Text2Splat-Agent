@@ -7,6 +7,10 @@ from .settings import Settings
 from .store import Store, valid_id
 
 
+class TemporaryWebscanError(ValueError):
+    """Temporary availability failure; callers must not replay mutations."""
+
+
 class Webscan:
     def __init__(self, settings: Settings, store: Store, client=None):
         self.url, self.store = settings.webscan_url, store
@@ -19,9 +23,12 @@ class Webscan:
             response.raise_for_status()
             return response.json()
         except httpx.HTTPStatusError as exc:
-            raise ValueError(f"web-scan 返回 HTTP {exc.response.status_code}，请检查本地服务及输入照片") from None
-        except (httpx.RequestError, ValueError):
-            raise ValueError("无法连接本地 web-scan，请启动服务后重试；不会切换云端 GPU") from None
+            error = TemporaryWebscanError if exc.response.status_code in {408, 429, 500, 502, 503, 504} else ValueError
+            raise error(f"web-scan 返回 HTTP {exc.response.status_code}，请检查本地服务及输入照片") from None
+        except httpx.RequestError:
+            raise TemporaryWebscanError("无法连接本地 web-scan，请启动服务后重试；不会切换云端 GPU") from None
+        except ValueError:
+            raise ValueError("web-scan 返回内容不是有效 JSON，请检查本地服务") from None
 
     def health(self):
         data = self.request("GET", "/api/health")

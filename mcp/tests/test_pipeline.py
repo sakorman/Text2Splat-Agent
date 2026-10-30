@@ -238,3 +238,53 @@ def test_real_mcp_tool_schemas_and_calls(setup):
         assert "cogview-3-flash" in str(result)
         assert len(await scan.list_tools()) == 7
     anyio.run(check)
+
+
+@pytest.mark.parametrize("status,temporary", [(408, True), (429, True), (500, True), (502, True),
+                                               (503, True), (504, True), (400, False), (401, False),
+                                               (403, False), (404, False), (409, False), (422, False)])
+def test_webscan_error_classification_never_replays_requests(setup, status, temporary):
+    from graphics_mcp.webscan import TemporaryWebscanError
+    settings, store, _, _ = setup
+    requests = []
+    def reject(request):
+        requests.append(request)
+        return httpx.Response(status, json={"message": "private-server-error"})
+    scan = Webscan(settings, store, httpx.Client(base_url=settings.webscan_url, transport=httpx.MockTransport(reject)))
+    # Even a retryable response to a mutation is returned once, not replayed by the adapter.
+    with pytest.raises(ValueError) as error:
+        scan.request("POST", "/api/jobs", json={})
+    assert isinstance(error.value, TemporaryWebscanError) is temporary
+    assert "private-server-error" not in str(error.value)
+    assert len(requests) == 1
+
+
+def test_webscan_network_failure_and_bad_json_are_distinct(setup):
+    from graphics_mcp.webscan import TemporaryWebscanError
+    settings, store, _, _ = setup
+    def unavailable(request):
+        raise httpx.ConnectError("private connection details", request=request)
+    scan = Webscan(settings, store, httpx.Client(base_url=settings.webscan_url, transport=httpx.MockTransport(unavailable)))
+    with pytest.raises(TemporaryWebscanError) as error:
+        scan.status("a" * 32)
+    assert "private" not in str(error.value)
+    scan.client = httpx.Client(base_url=settings.webscan_url, transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, text="private invalid body")))
+    with pytest.raises(ValueError) as error:
+        scan.status("a" * 32)
+    assert not isinstance(error.value, TemporaryWebscanError)
+    assert "private" not in str(error.value)
+
+
+def test_real_mcp_preserves_temporary_error_code(setup, monkeypatch):
+    from graphics_mcp.webscan import TemporaryWebscanError
+    settings, _, _, _ = setup
+    def unavailable(*args):
+        raise TemporaryWebscanError("本地重建服务暂不可用")
+    monkeypatch.setattr(Webscan, "status", unavailable)
+    async def check():
+        app, _ = create_server("webscan", settings, 0)
+        result = await app.call_tool("webscan_get_status", {"job_id": "a" * 32})
+        assert "TEMPORARY_UNAVAILABLE" in str(result)
+        assert "本地重建服务暂不可用" in str(result)
+    anyio.run(check)
