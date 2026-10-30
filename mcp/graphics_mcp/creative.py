@@ -55,6 +55,7 @@ class Creative:
                 spec = reference["spec"]
                 ref_raw = (self.store.directory(payload["reference_id"]) / reference["assets"][0]["name"]).read_bytes()
                 assets, views = [], []
+                seen = {}
                 for index, angle in enumerate(ANGLES):
                     self.checkpoint(jid)
                     self.store.update(jid, stage="multiview", message=f"正在生成视图 {index + 1}/12", assets=assets)
@@ -63,11 +64,17 @@ class Creative:
                     raw = self.providers.image(prompt, ref_raw)
                     self.checkpoint(jid)
                     assets.append(self.store.save_image(jid, index, raw))
+                    self.checkpoint(jid)
+                    digest = assets[-1]["sha256"]
+                    if digest in seen:
+                        # Pixels are normalized by save_image; PNG encoding/metadata cannot hide duplicates.
+                        self.store.update(jid, status="needs_review", stage="multiview", assets=assets,
+                                          message=f"第 {index + 1} 张视图与第 {seen[digest] + 1} 张重复，"
+                                                  "已停止后续生成，未开始重建。请调整描述后重试。")
+                        return
+                    seen[digest] = index
                     views.append(raw)
                     self.store.update(jid, assets=assets)
-                if len({a["sha256"] for a in assets}) != 12:
-                    self.store.update(jid, status="needs_review", message="视图存在重复，未开始重建", assets=assets)
-                    return
                 self.checkpoint(jid)
                 self.store.update(jid, stage="review", message="正在检查物件外观一致性")
                 review = self.providers.review(ref_raw, views)

@@ -46,7 +46,7 @@
 
 1. `glm-4.7-flash` 输出固定规格 JSON：物件名称、形状、材质、纹理与结构。
 2. `cogview-3-flash` 根据规格生成一张参考图。概念模式在此完成。
-3. 3D 模式按同一规格逐张请求 12 个角度。CogView 不接收参考图，因此清单明确记录 `reference_conditioned=false`、`geometry_verified=false`。
+3. 3D 模式按同一规格逐张请求 12 个角度。每张保存后按归一化 RGB 像素摘要与已有候选图比较，完全重复即终止为 `needs_review`，指出重复的两张图、保留已有图片，不调用剩余生图或外观审核，不发布可导入集合、不自动补图。仅调整编码或 PNG 元数据不能绕过检查；此处不判断近似重复或几何一致性。CogView 不接收参考图，因此完成的清单明确记录 `reference_conditioned=false`、`geometry_verified=false`。
 4. `glm-4.6v-flash` 接收缩略参考图和候选视图，检查明显结构差异、拼图和视角变化。格式异常或判断不一致时，不开始重建。
 5. web-scan 再次验证不同照片数量与像素数据，冻结 manifest。COLMAP 估计相机，Brush 用实际估计结果训练。
 6. 真实训练成功且存在非空 Gaussian PLY 后，Agent 才返回 `READY`。
