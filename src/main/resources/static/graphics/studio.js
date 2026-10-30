@@ -3,15 +3,9 @@ import {
   preparePendingRequest,
   clearPendingRequest,
 } from "./request-journal.mjs";
+import { terminal, acceptsJobUpdate } from "./job-updates.mjs";
 
 const $ = (id) => document.getElementById(id);
-const terminal = new Set([
-  "READY",
-  "CONCEPT_READY",
-  "NEEDS_REVIEW",
-  "FAILED",
-  "CANCELLED",
-]);
 const stages = {
   QUEUED: "正在准备生成…",
   PLANNING: "正在理解你的描述…",
@@ -24,6 +18,7 @@ const stages = {
 let current, events, pendingRequest;
 let submitting = false;
 let restoring = false;
+const pendingCancellations = new Set();
 
 async function api(path, options) {
   const response = await fetch("/api/graphics" + path, options);
@@ -45,6 +40,7 @@ function updateControls() {
   const running = current && !terminal.has(current.status);
   $("prompt").disabled = submitting || restoring || !!running;
   $("create-button").disabled = submitting || restoring || !!running;
+  $("cancel-button").disabled = pendingCancellations.has(current?.id);
   $("create-button").textContent = submitting
     ? "正在提交…"
     : restoring
@@ -150,6 +146,7 @@ function watch(id) {
     if (current?.id !== id) return;
     try {
       const job = JSON.parse(event.data);
+      if (!acceptsJobUpdate(current, job, id)) return;
       $("stream-note").hidden = true;
       render(job);
     } catch {
@@ -218,15 +215,19 @@ $("create-form").addEventListener("submit", async (event) => {
   }
 });
 $("cancel-button").addEventListener("click", async () => {
-  if (!current || terminal.has(current.status)) return;
-  $("cancel-button").disabled = true;
+  if (!current || terminal.has(current.status) || pendingCancellations.has(current.id)) return;
+  const id = current.id;
+  pendingCancellations.add(id);
+  updateControls();
   showError("");
   try {
-    render(await api(`/jobs/${current.id}/cancel`, { method: "POST" }));
+    const job = await api(`/jobs/${id}/cancel`, { method: "POST" });
+    if (acceptsJobUpdate(current, job, id)) render(job);
   } catch (error) {
-    showError(error.message);
+    if (current?.id === id && !terminal.has(current.status)) showError(error.message);
   } finally {
-    $("cancel-button").disabled = false;
+    pendingCancellations.delete(id);
+    updateControls();
   }
 });
 async function restoreSubmission() {
