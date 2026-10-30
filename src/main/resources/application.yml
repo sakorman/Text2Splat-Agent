@@ -1,6 +1,6 @@
 spring:
   application:
-    name: SpringAI-Agent
+    name: Text2Splat-Agent
   ai:
     openai:
       base-url: ${CHAT_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode}

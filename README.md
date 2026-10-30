@@ -1,4 +1,6 @@
-# SpringAI-Agent · 造物间
+# Text2Splat Agent · 造物方舟
+
+**文字驱动的本地 3DGS Agent。** Text 表示文字描述，Splat 对应 3D Gaussian Splatting；通过内置 MCP 串联设计、生图与本机重建。
 
 一句话设计一个文创物件：生成参考图、尝试生成 12 张候选视图，在自己的电脑上运行 COLMAP + Brush，得到可旋转查看的 3D Gaussian 展品。
 
@@ -19,8 +21,8 @@
 需要 **JDK 17+、Maven、Python 3.11+**。macOS / Linux 支持启动脚本；本地 3D 还需要已安装的 web-scan 和 Brush。Apple Silicon 可使用 Brush 的 Metal 后端，不需要 NVIDIA 显卡或云端 GPU。
 
 ```bash
-git clone https://github.com/sakorman/SpringAI-Agent.git
-cd SpringAI-Agent
+git clone https://github.com/sakorman/Text2Splat-Agent.git
+cd Text2Splat-Agent
 python3.12 -m venv .venv
 .venv/bin/python -m pip install -e 'mcp[dev]'
 cp .env.example .env

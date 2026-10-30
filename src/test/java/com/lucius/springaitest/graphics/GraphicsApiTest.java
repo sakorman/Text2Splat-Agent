@@ -32,7 +32,7 @@ class GraphicsApiTest {
     @Test void standaloneProfileStartsWithoutDatabasesAndServesUi() {
         var page = http.getForEntity("/graphics/", String.class);
         assertThat(page.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(page.getBody()).contains("造物间").contains("studio.js");
+        assertThat(page.getBody()).contains("Text2Splat Agent").contains("造物方舟").contains("studio.js");
         assertThat(page.getHeaders().getFirst("X-Content-Type-Options")).isEqualTo("nosniff");
     }
     @Test void invalidInputAndCrossOriginMutationAreRejected() {
