@@ -5,6 +5,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 from urllib.parse import urlsplit
@@ -17,6 +18,7 @@ os.chdir(ROOT)
 load_dotenv(ROOT / ".env")
 children = []
 stopping = False
+runtime_directory = tempfile.TemporaryDirectory(prefix="text2splat-runtime-")
 
 
 def stop(_signum=None, _frame=None):
@@ -54,7 +56,10 @@ try:
         url = local_url(os.getenv(env, default))
         spawn([sys.executable, "-m", "graphics_mcp.server", kind, "--port", str(urlsplit(url).port)])
     java = str(Path(os.environ["JAVA_HOME"]) / "bin/java") if os.getenv("JAVA_HOME") else shutil.which("java")
-    spawn([java, "-jar", str(ROOT / "target/SpringAITest-0.0.1-SNAPSHOT.jar"), "--spring.profiles.active=graphics"])
+    # Maven replaces target/ during verification; a live JVM must keep an immutable JAR.
+    runtime_jar = Path(runtime_directory.name) / "agent.jar"
+    shutil.copy2(ROOT / "target/SpringAITest-0.0.1-SNAPSHOT.jar", runtime_jar)
+    spawn([java, "-jar", str(runtime_jar), "--spring.profiles.active=graphics"])
     print(f"\nText2Splat Agent · 造物方舟启动中：http://127.0.0.1:{os.getenv('PORT', '8080')}/graphics/\n按 Ctrl-C 停止本次启动的服务。\n", flush=True)
     while not stopping:
         if any(process.poll() is not None for process in children):
@@ -71,3 +76,5 @@ finally:
             process.wait(timeout=max(0.1, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+    runtime_directory.cleanup()

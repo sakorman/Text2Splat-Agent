@@ -1,3 +1,9 @@
+import {
+  readPendingRequest,
+  preparePendingRequest,
+  clearPendingRequest,
+} from "./request-journal.mjs";
+
 const $ = (id) => document.getElementById(id);
 const terminal = new Set([
   "READY",
@@ -22,10 +28,13 @@ let restoring = false;
 async function api(path, options) {
   const response = await fetch("/api/graphics" + path, options);
   const data = await response.json().catch(() => ({}));
-  if (!response.ok)
-    throw new Error(
+  if (!response.ok) {
+    const error = new Error(
       data.message || `请求失败（${response.status}），请稍后重试。`,
     );
+    error.status = response.status;
+    throw error;
+  }
   return data;
 }
 function showError(message) {
@@ -180,10 +189,10 @@ $("create-form").addEventListener("submit", async (event) => {
   submitting = true;
   updateControls();
   const body = JSON.stringify({ prompt, mode: "THREE_D" });
-  // Retry an ambiguous submission with the same key; never start duplicate generation.
-  if (!pendingRequest || pendingRequest.body !== body)
-    pendingRequest = { body, key: crypto.randomUUID() };
   try {
+    // Persist the intent before POST: a reload can look up an accepted job without replaying it.
+    pendingRequest = preparePendingRequest(sessionStorage, body);
+    window.history.replaceState(null, "", `?request=${pendingRequest.key}`);
     const job = await api("/jobs", {
       method: "POST",
       headers: {
@@ -192,8 +201,9 @@ $("create-form").addEventListener("submit", async (event) => {
       },
       body,
     });
-    pendingRequest = null;
     openJob(job);
+    clearPendingRequest(sessionStorage, pendingRequest.key);
+    pendingRequest = null;
   } catch (error) {
     showError(
       error instanceof TypeError
@@ -217,16 +227,45 @@ $("cancel-button").addEventListener("click", async () => {
     $("cancel-button").disabled = false;
   }
 });
-const selected = new URLSearchParams(location.search).get("job");
-if (selected && /^[a-f0-9]{32}$/.test(selected)) {
+async function restoreSubmission() {
+  const query = new URLSearchParams(location.search);
+  const selected = query.get("job");
+  const requestKey = query.get("request");
+  const validJob = selected && /^[a-f0-9]{32}$/.test(selected);
+  const validRequest =
+    requestKey &&
+    /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(requestKey);
   restoring = true;
   updateControls();
   try {
-    openJob(await api("/jobs/" + selected));
+    pendingRequest = readPendingRequest(sessionStorage);
+    if (validJob) {
+      const job = await api("/jobs/" + selected);
+      openJob(job);
+      if (pendingRequest?.key === job.requestKey) {
+        clearPendingRequest(sessionStorage, pendingRequest.key);
+        pendingRequest = null;
+      }
+      return;
+    }
+    const key = validRequest ? requestKey : pendingRequest?.key;
+    if (!key) return;
+    if (pendingRequest?.key === key)
+      $("prompt").value = JSON.parse(pendingRequest.body).prompt;
+    // Read-only recovery: refreshing must never start image generation.
+    const job = await api("/requests/" + key);
+    openJob(job);
+    clearPendingRequest(sessionStorage, key);
+    pendingRequest = null;
   } catch (error) {
-    showError(error.message);
+    showError(
+      error.status === 404 && !validJob
+        ? "上次提交尚未确认。点击「生成 3D 模型」重试，同一描述会沿用原提交记录。"
+        : error.message,
+    );
   } finally {
     restoring = false;
     updateControls();
   }
 }
+await restoreSubmission();

@@ -27,6 +27,7 @@ class GraphicsApiTest {
     }
     @Autowired TestRestTemplate http;
     @Autowired ObjectMapper mapper;
+    @Autowired GraphicsJobStore store;
     @MockitoBean GraphicsTools tools;
 
     @Test void standaloneProfileStartsWithoutDatabasesAndServesUi() {
@@ -65,5 +66,22 @@ class GraphicsApiTest {
     }
     @Test void nonexistentAssetsAreNotServed() {
         assertThat(http.getForEntity("/api/graphics/assets/" + "a".repeat(32) + "/00.png", String.class).getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+    }
+
+    @Test void requestLookupRecoversAcceptedJobsWithoutExecutingTools() {
+        var before = store.list().size();
+        var missing = http.getForEntity("/api/graphics/requests/not-submitted", Map.class);
+        assertThat(missing.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(store.list()).hasSize(before);
+        var job = store.create("一个青瓷花瓶", "THREE_D", null, "lost-browser-response").job();
+        var found = http.getForEntity("/api/graphics/requests/lost-browser-response", Map.class);
+        assertThat(found.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(found.getBody().get("id")).isEqualTo(job.path("id").asText());
+        assertThat(found.getHeaders().getCacheControl()).isEqualTo("no-store");
+        assertThat(store.list()).hasSize(before + 1);
+        verifyNoInteractions(tools);
+        assertThat(http.getForEntity("/api/graphics/requests/" + "a".repeat(161), Map.class)
+                .getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        store.update(job.path("id").asText(), j -> j.put("status", "CANCELLED"));
     }
 }

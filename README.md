@@ -43,7 +43,7 @@ WEBSCAN_URL=http://127.0.0.1:8787
 ./scripts/start-graphics.sh
 ```
 
-打开 **http://127.0.0.1:8080/graphics/**。脚本先构建 Java，然后启动两个 MCP 和 Agent；检测到本机 web-scan 已运行时直接复用，否则尝试用 `WEBSCAN_REPO/.venv/bin/python` 启动它。Ctrl-C 只停止本次脚本启动的进程。
+打开 **http://127.0.0.1:8080/graphics/**。脚本先构建 Java，然后启动两个 MCP 和 Agent；检测到本机 web-scan 已运行时直接复用，否则尝试用 `WEBSCAN_REPO/.venv/bin/python` 启动它。Ctrl-C 只停止本次脚本启动的进程。Agent 从临时 JAR 副本运行，后续 Maven 构建不会覆盖正在运行的包；停止时清理副本。
 
 输入物件描述，点击「生成 3D 模型」。页面始终提交 `THREE_D` 任务，后台在生图前检查 web-scan、Brush 和模型密钥。中间图片、技术配置和历史列表不出现在主界面；旧任务和图片仍保存在本地，概念图模式保留为 API 调试能力。
 
@@ -93,6 +93,8 @@ curl http://127.0.0.1:8080/api/graphics/jobs \
   -d '{"prompt":"一个青瓷卷草纹花瓶，哑光表面","mode":"THREE_D"}'
 ```
 
+页面在提交前将请求标识与描述保存在当前标签页的 `sessionStorage`。即使服务器接受任务后响应丢失，刷新也只查询原任务，不自动重发生成；尚未找到时，手动重试相同描述会复用原标识。确认任务 ID 后清除待确认记录。浏览器存储不可用时停止提交，避免产生无法恢复的重复请求。
+
 接口立即返回 `202` 和任务 ID。同一 `Idempotency-Key` 与相同请求返回同一个任务；变更描述请使用新 key。`parentJobId` 可记录版本关系，新版本会重新生成参考图。
 
 | 方法 | 路径 | 说明 |
@@ -101,6 +103,7 @@ curl http://127.0.0.1:8080/api/graphics/jobs \
 | POST | `/api/graphics/jobs` | `prompt`、`mode`（`CONCEPT` / `THREE_D`）、可选 `parentJobId` |
 | GET | `/api/graphics/jobs` | 最近 50 个任务 |
 | GET | `/api/graphics/jobs/{id}` | 完整状态与结果 |
+| GET | `/api/graphics/requests/{key}` | 按原提交标识只读恢复任务；未找到返回 404，不启动生成 |
 | GET | `/api/graphics/jobs/{id}/events` | SSE，事件名 `progress`，每次发送完整状态 |
 | POST | `/api/graphics/jobs/{id}/cancel` | 停止后续步骤并取消下游任务 |
 | GET | `/api/graphics/assets/{setId}/{name}` | 本地生成的 PNG，仅允许受控 ID 与文件名 |
@@ -132,6 +135,7 @@ web-scan 自己的数据库、训练缓存和 Gaussian 模型仍保存在它的�
 mvn verify
 .venv/bin/python -m pytest mcp/tests -q
 node --check src/main/resources/static/graphics/studio.js
+node --test tests/*.test.mjs
 ```
 
 自动测试不调用外部模型，不消耗 token，也不启动 GPU 训练。覆盖任务状态、取消竞态、重启处理、丢失响应、幂等、外观检查失败、SfM 失败、产物缺失、HTTP 导入契约、MCP SDK 工具声明与 API 输入校验。
