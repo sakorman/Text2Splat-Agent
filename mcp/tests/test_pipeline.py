@@ -224,8 +224,9 @@ def test_webscan_http_contract_and_artifact_gate(setup):
             payload = json.loads(request.content)
             assert payload["backend"] == "brush" and payload["steps"] == 3000
             assert payload["evaluation_mode"] == "all"
-            jobs.append({"id": jid, "config": {k:v for k,v in payload.items() if k != "session_id"}})
-            return httpx.Response(201, json={"id": jid})
+            jobs.append({"id": jid, "session_id": sid, "status": "queued",
+                         "config": {k:v for k,v in payload.items() if k != "session_id"}})
+            return httpx.Response(201, json=jobs[-1])
         if path == f"/api/jobs/{jid}":
             return httpx.Response(200, json={"id": jid, "session_id": sid, "status": "succeeded"})
         if path.endswith("/artifacts"):

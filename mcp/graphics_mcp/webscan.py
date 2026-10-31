@@ -6,6 +6,9 @@ import httpx
 from .settings import Settings
 from .store import Store, valid_id
 
+RECONSTRUCTION_CONFIG = {"backend": "brush", "steps": 3000, "resolution": 512, "max_points": 150000,
+                         "camera_mode": "auto", "evaluation_mode": "all"}
+
 
 class TemporaryWebscanError(ValueError):
     """Temporary availability failure; callers must not replay mutations."""
@@ -71,40 +74,63 @@ class Webscan:
         valid_id(session_id)
         if not 1 <= len(request_id) <= 160:
             raise ValueError("无效请求标识")
-        config = {"backend": "brush", "steps": 3000, "resolution": 512, "max_points": 150000,
-                  "camera_mode": "auto", "evaluation_mode": "all"}
+        config = dict(RECONSTRUCTION_CONFIG)
         with self.lock:
             key = "train:" + request_id
             linked = self.store.link(key)
             if linked and linked["session_id"] != session_id:
                 raise ValueError("同一请求标识不能用于不同采集")
-            if linked and linked.get("job_id"):
-                return linked
+            if linked:
+                # A durable submit intent means the POST may already have happened.
+                # Repeated tool calls may only reconcile it, never send another POST.
+                return self.by_request(request_id)
             session = self.request("GET", f"/api/sessions/{session_id}")
-            # Recover a lost POST response without accidentally launching training twice.
-            existing = next((j for j in session.get("jobs", []) if j.get("config") == config), None)
+            existing = self.matching_job(session, session_id, config)
             if existing:
                 jid = existing["id"]
             else:
-                self.store.link(key, {"session_id": session_id})
+                if any(j.get("status") in {"queued", "running"} for j in session["jobs"]):
+                    raise ValueError("该采集已有其他参数的重建任务运行中，未启动新的训练")
+                self.store.link(key, {"session_id": session_id, "config": config})
                 job = self.request("POST", "/api/jobs", json={"session_id": session_id, **config})
+                if not isinstance(job, dict) or job.get("session_id") != session_id or job.get("config") != config:
+                    raise ValueError("重建返回的采集或参数不匹配，提交结果仍未知")
                 jid = job["id"]
-            return self.store.link(key, {"session_id": session_id, "job_id": valid_id(jid)})
+            return self.store.link(key, {"session_id": session_id, "config": config, "job_id": valid_id(jid)})
+
+    @staticmethod
+    def matching_job(session, session_id, config):
+        if not isinstance(session, dict) or session.get("id") != session_id or not isinstance(session.get("jobs"), list):
+            raise ValueError("重建采集任务列表无效，未选择下游任务")
+        jobs = session["jobs"]
+        if any(not isinstance(job, dict) for job in jobs):
+            raise ValueError("重建采集任务列表无效，未选择下游任务")
+        matches = [job for job in jobs if job.get("session_id") == session_id and job.get("config") == config]
+        if len(matches) > 1:
+            raise ValueError("存在多个匹配的重建任务，提交结果仍未知；不会自动选择或取消其中一个")
+        if matches:
+            valid_id(matches[0]["id"])
+            return matches[0]
+        return None
 
     def status(self, job_id):
         data = self.request("GET", "/api/jobs/" + valid_id(job_id))
         return {key: data.get(key) for key in ("id", "session_id", "status", "stage", "progress", "message", "report")}
 
     def by_request(self, request_id):
-        linked = self.store.link("train:" + request_id)
-        if linked and not linked.get("job_id"):
-            session = self.request("GET", f"/api/sessions/{valid_id(linked['session_id'])}")
-            jobs = session.get("jobs", [])
-            if jobs:
-                linked = {**linked, "job_id": valid_id(jobs[0]["id"])}
-            else:
-                raise ValueError("重建提交结果仍未知，暂时无法确认下游任务已停止")
-        return linked
+        with self.lock:
+            key = "train:" + request_id
+            linked = self.store.link(key)
+            if linked and not linked.get("job_id"):
+                sid = valid_id(linked["session_id"])
+                # Older intents used this same fixed preset without storing it.
+                config = linked.get("config", RECONSTRUCTION_CONFIG)
+                session = self.request("GET", f"/api/sessions/{sid}")
+                job = self.matching_job(session, sid, config)
+                if job is None:
+                    raise ValueError("重建提交结果仍未知，暂时无法确认下游任务已停止")
+                linked = self.store.link(key, {**linked, "config": config, "job_id": valid_id(job["id"])})
+            return linked
 
     def cancel(self, job_id):
         data = self.request("POST", f"/api/jobs/{valid_id(job_id)}/cancel")
