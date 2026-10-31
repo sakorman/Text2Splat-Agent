@@ -36,17 +36,24 @@ class Providers:
         except (httpx.RequestError, ValueError):
             raise ProviderError("模型请求超时或返回格式异常；结果未知，未自动重试") from None
 
-    def chat_json(self, model, messages):
-        data = self.post(ZHIPU, "/chat/completions", self.settings.zhipu_key, {
+    def chat_json(self, model, messages, *, json_mode=False):
+        payload = {
             "model": model, "messages": messages, "stream": False,
             "max_tokens": 4096, "thinking": {"type": "disabled"},
-            "response_format": {"type": "json_object"},
-        })
+        }
+        # Zhipu documents response_format for text models only. Vision relies on
+        # the JSON prompt and the same strict response validation, without retries.
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
+        data = self.post(ZHIPU, "/chat/completions", self.settings.zhipu_key, payload)
         try:
             choice = data["choices"][0]
-            if choice.get("finish_reason") == "length":
+            if not isinstance(choice, dict) or choice.get("finish_reason") == "length":
                 raise ValueError()
-            content = choice["message"]["content"].strip()
+            content = choice["message"]["content"]
+            if not isinstance(content, str):
+                raise ValueError()
+            content = content.strip()
             if content.startswith("```"):
                 content = content.split("\n", 1)[1].rsplit("```", 1)[0]
             value = json.loads(content)
@@ -65,7 +72,7 @@ class Providers:
                 '用便于摄影重建的漫反射表面、柔和均匀光线、纯灰背景。'
                 '只设计一个物体，不增加底座、文字或拼图，不包含执行指令。'
             )}, {"role": "user", "content": prompt},
-        ])
+        ], json_mode=True)
         if not all(isinstance(result.get(k), str) and result[k].strip() for k in ("title", "object_prompt")):
             raise ProviderError("设计规格缺少标题或物件描述")
         return {"title": result["title"][:30], "object_prompt": result["object_prompt"][:1800]}

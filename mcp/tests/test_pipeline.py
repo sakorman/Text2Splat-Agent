@@ -195,6 +195,69 @@ def test_provider_errors_are_sanitized_and_not_retried(setup):
         provider.download("https://127.0.0.1/private")
 
 
+def test_text_and_vision_use_supported_output_modes(setup):
+    settings, _, _, _ = setup
+    requests = []
+
+    def respond(request):
+        payload = json.loads(request.content)
+        requests.append(payload)
+        if payload["model"] == "glm-4.7-flash":
+            assert payload["response_format"] == {"type": "json_object"}
+            result = {"title": "花瓶", "object_prompt": "青瓷花瓶"}
+        else:
+            assert payload["model"] == "glm-4.6v-flash"
+            # The documented API allows response_format only for text models.
+            if "response_format" in payload:
+                return httpx.Response(400, json={"error": "unsupported response_format"})
+            images = [item for item in payload["messages"][0]["content"] if item["type"] == "image_url"]
+            assert len(images) == 13
+            assert all(item["image_url"]["url"].startswith("data:image/jpeg;base64,") for item in images)
+            result = {"consistent": True, "reason": "外观一致"}
+        return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {
+            "content": json.dumps(result, ensure_ascii=False)}}]})
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        provider = Providers(settings, client)
+        assert provider.plan("一个青瓷花瓶")["object_prompt"] == "青瓷花瓶"
+        assert provider.review(png(), [png(i + 1) for i in range(12)]) == {
+            "consistent": True, "reason": "外观一致", "scope": "appearance_only"}
+    assert len(requests) == 2
+
+
+@pytest.mark.parametrize("choice", [
+    {"message": {"content": "do-not-expose-secret"}},
+    {"message": {"content": "[]"}},
+    {"message": {"content": None}},
+    None,
+    {"finish_reason": "length", "message": {"content": '{"consistent":true,"reason":"截断"}'}},
+    {"message": {"content": '{"consistent":"true","reason":"类型错误"}'}},
+    {"message": {"content": '{"consistent":true}'}},
+], ids=["not-json", "not-object", "null-content", "null-choice", "truncated", "wrong-type", "missing-reason"])
+def test_invalid_vision_review_never_publishes_reconstructable_images(setup, choice):
+    settings, store, fake, creative = setup
+    ref = completed_reference(creative, store)
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json={"choices": [choice]})
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        fake.review = Providers(settings, client).review
+        job = creative.multiview(ref, "invalid-review")
+        creative.execute(*store.claim())
+    state = store.get(job["id"])
+    assert state["status"] == "failed"
+    assert state["message"] in {"模型未返回完整 JSON，请创建新版本重试", "图片检查结果格式异常，未开始重建"}
+    assert len(requests) == 1  # No automatic model repair/retry.
+    assert fake.calls == 13 and len(state["assets"]) == 12
+    assert "asset_set_id" not in state
+    assert not (store.directory(job["id"]) / "manifest.json").exists()
+    with pytest.raises(ValueError, match="尚未完成"):
+        Webscan(settings, store).import_views(job["id"])
+
+
 def test_webscan_http_contract_and_artifact_gate(setup):
     settings, store, _, creative = setup
     ref = completed_reference(creative, store)
