@@ -51,6 +51,8 @@
 5. web-scan 再次验证不同照片数量与像素数据，冻结 manifest。COLMAP 估计相机，Brush 用实际估计结果训练。
 6. 真实训练成功且存在非空 Gaussian PLY 后，Agent 才返回 `READY`。
 
+智谱的 `response_format` 参数仅用于文本模型：设计规划启用 JSON 模式；视觉审核通过提示词要求 JSON，再在本地解析并检查 `consistent` 布尔值和 `reason` 字符串。空回复、非 JSON、截断或字段异常均停止流程，不发布可重建集合，不自动重试审核。视觉接口不携带仅文本模型支持的参数；这不代表审核已经通过真实模型或几何验证。
+
 可选 `IMAGE_PROVIDER=seedream` 将参考图输入每次视图生成请求。必须同时配置 `ARK_API_KEY` 与 `ALLOW_PAID_IMAGE_API=true`。不自动重试、不自动切换供应商，每次完整尝试最多 13 个生图请求。参考图约束仍不能保证跨图三维一致性。
 
 ## 任务可靠性
