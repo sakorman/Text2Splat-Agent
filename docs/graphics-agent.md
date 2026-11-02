@@ -38,7 +38,7 @@
 
 ## 3D 专家 ReAct 循环与检查点
 
-`agent/text2splat/workflow.py` 的 StateGraph 为 `preflight → model ⇄ tools → finish`，不再通过固定边依次调用全部阶段。`react.py` 用 LangChain `bind_tools` 将工具 schema 提交给 GLM-4.7-Flash；模型产生原生 tool_calls，执行结果以对应 tool_call_id 的 ToolMessage 返回，驱动下一轮决策。它不依赖解析文本中的 Thought/Action，也不要求输出思维链。
+`agent/text2splat/workflow.py` 的 StateGraph 为 `preflight → model ⇄ tools → finish`，不再通过固定边依次调用全部阶段。`react.py` 用 LangChain `bind_tools` 将工具 schema 提交给选定文本模型（默认 GLM-4.7-Flash）；模型产生原生 tool_calls，执行结果以对应 tool_call_id 的 ToolMessage 返回，驱动下一轮决策。它不依赖解析文本中的 Thought/Action，也不要求输出思维链。
 
 模型工具为参考图、候选视图、导入、重建、验证、任务检查、完成和停止。前五个工具调用已有 MCP 服务，并在程序内等待结果；可选的 `design_hint` 只能作为原始描述的补充。工具参数不接受其他任务 ID、路径、费用开关或供应商配置；每次执行都检查当前任务的前置条件。
 
@@ -88,7 +88,7 @@ Creative 与 Web-scan 两个服务只监听 loopback，使用 `/mcp` Streamable 
 
 ## 免费路径与可选生图路径
 
-1. `glm-4.7-flash` 输出固定规格 JSON：物件名称、形状、材质、纹理与结构。
+1. `ZHIPU_TEXT_MODEL` 选定的模型（默认 `glm-4.7-flash`）输出固定规格 JSON：物件名称、形状、材质、纹理与结构。
 2. `cogview-3-flash` 根据规格生成一张参考图。概念模式在此完成。
 3. 3D 模式按同一规格逐张请求 12 个角度。每张保存后按归一化 RGB 像素摘要与已有候选图比较，完全重复即终止为 `needs_review`，指出重复的两张图、保留已有图片，不调用剩余生图或外观审核，不发布可导入集合、不自动补图。仅调整编码或 PNG 元数据不能绕过检查；此处不判断近似重复或几何一致性。CogView 不接收参考图，因此完成的清单明确记录 `reference_conditioned=false`、`geometry_verified=false`。
 4. `glm-4.6v-flash` 接收缩略参考图和候选视图，检查明显结构差异、拼图和视角变化。格式异常或判断不一致时，不开始重建。
@@ -120,7 +120,7 @@ Creative 与 Web-scan 两个服务只监听 loopback，使用 `/mcp` Streamable 
 
 在目标 Mac 上已确认 web-scan `/api/health` 报告 `brush_available=true`，Agent 能通过两个真实 MCP 服务读取配置与本机重建状态。
 
-**尚未验证：真实外部模型生成、生成图片的多视角几何一致性、从生成图到可旋转 3D 的最终质量。** 原因是此环境未配置个人智谱 API Key。不能以单元测试或已有真实照片重建结果替代这项验证。
+已通过用户提供的本地密钥验证 GLM-5.3-Flash 的聊天、生成意图原生工具选择、只读 ReAct 工具结果往返和设计 JSON。**尚未验证：真实外部生图、生成图片的多视角几何一致性、从生成图到可旋转 3D 的最终质量。** 不能以文本模型调用、单元测试或已有真实照片重建结果替代这项验证。
 
 真实验收表：
 
@@ -136,7 +136,11 @@ Creative 与 Web-scan 两个服务只监听 loopback，使用 `/mcp` Streamable 
 
 Agent 和 Creative MCP 都从本地 `.env` 读取同一个 `ZHIPU_API_KEY`，浏览器不接触密钥。健康接口返回决策模型配置状态和轮数上限；任务 API 记录 `agentLoop`、`agentRounds`、`agentActions`。正常 3D 流程约有 6 次决策模型请求，检查与纠错可能增加至 12 次，原有设计规划和视觉审核另计。取消和总超时在等待模型时也会检查，停止等待不代表供应商撤销了已收到的请求。
 
-现有证据包括原生 function calling 的 HTTP 契约替身与真实 LangGraph 循环测试；未配置密钥时不能宣称已验证真实 GLM 的工具选择质量。ReAct 不会让独立文生图自动具备多视角几何一致性，也不绕过真实重建门槛。
+现有证据包括原生 function calling 的 HTTP 契约替身、真实 LangGraph 循环和有限真实 API 样例；这些样例不是完整的工具选择质量或误触发率评估。ReAct 不会让独立文生图自动具备多视角几何一致性，也不绕过真实重建门槛。
+
+文本模型由 `ZHIPU_TEXT_MODEL` 显式选择，支持默认免费的 `glm-4.7-flash` 与计量的 `glm-5.3-flash`；不自动降级或换模型。资源包只代表对应模型的可用额度，不保证持续免费，当前不读取控制台余额。该配置共享给聊天、专家决策与设计规划，不改变 CogView、视觉审核或付费生图开关。
+
+GLM-5.3-Flash 必须开启思考，使用 `thinking={type: enabled, clear_thinking: true}` 和 `reasoning_effort=low`。固定版本 langchain-openai 会丢弃供应商的 reasoning_content，故以小型 ZhipuChatModel 子类在请求/响应边界处理它：通过程序生成的消息 ID 关联，只在当前任务内存中保留并原样回传完整工具交互；供应商未返回时保持缺省。消息、检查点与记忆没有此字段；上下文压缩同步丢弃对应缓存，任务完成、失败和取消均清除。已经丢失的临时上下文不能用虚构内容恢复，服务重启仍不自动重放任务。这些供应商字段不计入可见消息的 12,000 字符预算，仍受单次输出上限与最多 12 轮限制。
 
 ## 官方接口参考
 

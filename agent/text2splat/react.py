@@ -1,11 +1,12 @@
 """Native function-calling ReAct decisions; no text parsing or implicit retries."""
 import httpx
-from langchain.chat_models import init_chat_model
+from uuid import uuid4
 from langchain_core.messages import AIMessage, SystemMessage
 from openai import APIConnectionError, APIStatusError
 from pydantic import BaseModel, ConfigDict, Field
 
 from graphics_mcp.providers import ZHIPU
+from graphics_mcp.text_models import QUOTA_TEXT_MODEL, ZhipuChatModel, text_request_options
 from .tools import ToolFailure
 
 
@@ -57,20 +58,30 @@ class ReActModel:
 
     def __init__(self, settings, transport=None):
         self.settings, self.transport = settings, transport
+        self._reasoning_history = {}
+
+    def clear_reasoning(self):
+        self._reasoning_history.clear()
 
     async def ainvoke(self, messages):
         if not self.settings.zhipu_key:
             raise ToolFailure("请在本地 .env 配置 ZHIPU_API_KEY 并重启 Agent 与 MCP 服务")
+        # Drop prior tasks and exchanges removed by context compaction. These
+        # opaque values never enter graph state, messages, memory or public APIs.
+        retained_ids = {m.id for m in messages if isinstance(m, AIMessage)}
+        self._reasoning_history = {k: v for k, v in self._reasoning_history.items() if k in retained_ids}
         try:
             async with httpx.AsyncClient(timeout=self.settings.model_timeout, transport=self.transport,
                                          follow_redirects=False) as client:
-                model = init_chat_model(
-                    "glm-4.7-flash", model_provider="openai", base_url=ZHIPU,
+                adapter = ZhipuChatModel(
+                    model=self.settings.text_model, base_url=ZHIPU,
                     api_key=self.settings.zhipu_key, http_async_client=client,
                     max_retries=0, timeout=self.settings.model_timeout,
                     stream_usage=False, use_responses_api=False,
-                    extra_body={"max_tokens": 1024, "thinking": {"type": "disabled"}},
-                ).bind_tools(self.definitions, tool_choice="auto")
+                    extra_body=text_request_options(self.settings.text_model, 1024),
+                )
+                adapter.set_reasoning_history(self._reasoning_history)
+                model = adapter.bind_tools(self.definitions, tool_choice="auto")
                 # No unsupported parallel_tool_calls/strict or JSON-mode parameters.
                 reply = await model.ainvoke([SystemMessage(self.system), *messages])
         except APIStatusError as exc:
@@ -85,4 +96,8 @@ class ReActModel:
         # 3D decisions retain actions only; the chat subclass also keeps the visible reply.
         # Neither retains provider reasoning text or metadata.
         content = reply.content if self.retain_text and isinstance(reply.content, str) else ""
-        return AIMessage(content=content[:8000], tool_calls=reply.tool_calls)
+        message_id = uuid4().hex
+        reasoning = adapter.take_reasoning()
+        if self.settings.text_model == QUOTA_TEXT_MODEL and reply.tool_calls and not self.retain_text:
+            self._reasoning_history[message_id] = reasoning
+        return AIMessage(id=message_id, content=content[:8000], tool_calls=reply.tool_calls)

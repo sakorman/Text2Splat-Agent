@@ -166,7 +166,8 @@ def model_response(name="generate_reference", arguments="{}", finish="tool_calls
                                         "function": {"name": name, "arguments": arguments}}]}}]}
 
 
-async def test_native_langchain_function_calling_round_trip_controls_actual_graph(rig):
+@pytest.mark.parametrize("text_model", ["glm-4.7-flash", "glm-5.3-flash"])
+async def test_native_langchain_function_calling_round_trip_controls_actual_graph(rig, text_model):
     workflow, _, tools, _ = rig
     payloads = []
 
@@ -174,31 +175,94 @@ async def test_native_langchain_function_calling_round_trip_controls_actual_grap
         body = json.loads(request.content)
         payloads.append(body)
         assert request.url == "https://open.bigmodel.cn/api/paas/v4/chat/completions"
-        assert body["model"] == "glm-4.7-flash" and body["tool_choice"] == "auto"
-        assert body["max_tokens"] == 1024 and body["thinking"] == {"type": "disabled"}
+        assert body["model"] == text_model and body["tool_choice"] == "auto"
+        assert body["max_tokens"] == 1024
+        if text_model == "glm-5.3-flash":
+            assert body["thinking"] == {"type": "enabled", "clear_thinking": True}
+            assert body["reasoning_effort"] == "low"
+            for message in body["messages"]:
+                if message.get("tool_calls"):
+                    assert message["reasoning_content"] == "private reasoning " + message["tool_calls"][0]["id"]
+        else:
+            assert body["thinking"] == {"type": "disabled"}
+            assert all("reasoning_content" not in m for m in body["messages"])
         assert not {"response_format", "parallel_tool_calls", "max_completion_tokens"}.intersection(body)
         assert len(body["tools"]) == 8
         assert body["messages"][0]["role"] == "system"
         if body["messages"][-1]["role"] == "tool":
             last = body["messages"][-1]
-            assert last["tool_call_id"] == "native-call"
+            assert last["tool_call_id"].startswith("native-")
             allowed = json.loads(last["content"])["observation"]["allowed_actions"]
             name = next(n for n in allowed if n not in {"inspect_task", "stop"})
         else:
             name = "generate_reference"
-        return httpx.Response(200, json=model_response(name))
+        if text_model == "glm-5.3-flash" and len(payloads) <= 2:
+            name = "inspect_task"  # Exercise compaction after seven exchanges.
+        response = model_response(name)
+        message = response["choices"][0]["message"]
+        message["tool_calls"][0]["id"] = "native-" + str(len(payloads))
+        message["reasoning_content"] = "private reasoning " + message["tool_calls"][0]["id"]
+        return httpx.Response(200, json=response)
 
-    workflow.model = ReActModel(replace(workflow.settings, zhipu_key="test-secret"), httpx.MockTransport(respond))
+    workflow.settings = replace(workflow.settings, zhipu_key="test-secret", text_model=text_model)
+    workflow.model = ReActModel(workflow.settings, httpx.MockTransport(respond))
     job = await complete(workflow)
-    assert job["status"] == "READY" and len(payloads) == 6
+    assert job["status"] == "READY" and len(payloads) == (8 if text_model == "glm-5.3-flash" else 6)
+    assert not workflow.model._reasoning_history
+    assert (await workflow.health())["decision_model"] == text_model
+    if text_model == "glm-5.3-flash":
+        assert len([m for m in payloads[-1]["messages"] if m.get("tool_calls")]) == 2
     assert tools.calls["webscan_start_reconstruction"] == 1
     snapshot = await workflow.graph.aget_state({"configurable": {"thread_id": job["id"]}})
     assert all(m.content == "" for m in snapshot.values["messages"] if isinstance(m, AIMessage))
     assert "test-secret" not in str(snapshot.values) and "private reasoning" not in str(snapshot.values)
 
 
+async def test_thinking_tool_history_cannot_be_invented_after_restart():
+    requests = []
+    model = ReActModel(AgentSettings(zhipu_key="test", text_model="glm-5.3-flash"),
+                       httpx.MockTransport(lambda r: requests.append(r)))
+    restored = AIMessage(id="old", content="", tool_calls=[{"id": "call", "name": "inspect_task", "args": {}}])
+    with pytest.raises(ToolFailure):
+        await model.ainvoke([HumanMessage("花瓶"), restored, ToolMessage("{}", tool_call_id="call")])
+    assert not requests
+
+
+async def test_thinking_is_not_shared_with_another_task():
+    payloads = []
+    def respond(request):
+        payloads.append(json.loads(request.content))
+        return httpx.Response(200, json=model_response("inspect_task"))
+    model = ReActModel(AgentSettings(zhipu_key="test", text_model="glm-5.3-flash"), httpx.MockTransport(respond))
+    first = await model.ainvoke([HumanMessage("花瓶")])
+    second = await model.ainvoke([HumanMessage("小鸟")])
+    assert first.id != second.id and set(model._reasoning_history) == {second.id}
+    assert all("reasoning_content" not in m for m in payloads[-1]["messages"])
+    assert "private reasoning" not in first.model_dump_json()
+    model.clear_reasoning()
+    assert not model._reasoning_history
+
+
+async def test_omitted_provider_thinking_is_not_fabricated_on_next_tool_round(rig):
+    workflow, _, tools, _ = rig
+    calls = []
+    def respond(request):
+        calls.append(request)
+        assert all("reasoning_content" not in m for m in json.loads(request.content)["messages"])
+        response = model_response("inspect_task" if len(calls) == 1 else "stop")
+        response["choices"][0]["message"].pop("reasoning_content")
+        return httpx.Response(200, json=response)
+    workflow.model = ReActModel(replace(workflow.settings, zhipu_key="test", text_model="glm-5.3-flash"),
+                               httpx.MockTransport(respond))
+    job = await complete(workflow)
+    assert job["status"] == "FAILED" and job["agentRounds"] == 2
+    assert len(calls) == 2 and not tools.calls["creative_generate_reference"]
+    assert not workflow.model._reasoning_history
+
+
+@pytest.mark.parametrize("text_model", ["glm-4.7-flash", "glm-5.3-flash"])
 @pytest.mark.parametrize("failure", [429, 503, "timeout", "malformed", "truncated"])
-async def test_decision_provider_fails_once_and_sanitizes(failure):
+async def test_decision_provider_fails_once_and_sanitizes(failure, text_model):
     calls = []
 
     def respond(request):
@@ -210,7 +274,7 @@ async def test_decision_provider_fails_once_and_sanitizes(failure):
         return httpx.Response(200, json=model_response(arguments="not-json" if failure == "malformed" else "{}",
                                                        finish="length" if failure == "truncated" else "tool_calls"))
 
-    model = ReActModel(AgentSettings(zhipu_key="test-key"), httpx.MockTransport(respond))
+    model = ReActModel(AgentSettings(zhipu_key="test-key", text_model=text_model), httpx.MockTransport(respond))
     with pytest.raises(ToolFailure) as caught:
         await model.ainvoke([HumanMessage("花瓶")])
     assert len(calls) == 1 and "secret-details" not in str(caught.value)

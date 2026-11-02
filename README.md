@@ -12,6 +12,7 @@
 - 两个独立 LangGraph Agent：对话主管与后台 ReAct 3D 专家，各有消息上下文、检查点与工作队列。通过真正的内置 MCP 会话委派，不使用关键词匹配启动生成。
 - 两个 Streamable HTTP 图形 MCP 服务，另有一个使用官方 SDK 内存传输的生成委派 MCP，无需新开端口。
 - 默认免费模型：`glm-4.7-flash` 做聊天、工具选择、ReAct 决策与整理设计，`cogview-3-flash` 生图，`glm-4.6v-flash` 检查外观。
+- 可通过 `ZHIPU_TEXT_MODEL=glm-5.3-flash` 显式使用已有资源包或授权计费的文本模型，支持强制思考与连续工具调用；不会自动切换模型。
 - 可选 Seedream 4.0 参考图约束生成，必须通过本地配置显式开启付费，不自动降级到付费服务。
 - 接入已有 [web-scan](https://github.com/sakorman/web-scan)：导入图片、冻结采集、SfM、Brush 本地 GPU 训练、预览与下载。
 - 异步任务、本地持久化、请求幂等、取消传播、重启中断恢复、丢失提交响应后的任务查询；进度连接短暂中断时有限重试只读查询。
@@ -34,11 +35,14 @@ cp .env.example .env
 
 ```dotenv
 ZHIPU_API_KEY=填写自己的密钥
+ZHIPU_TEXT_MODEL=glm-4.7-flash
 IMAGE_PROVIDER=cogview
 ALLOW_PAID_IMAGE_API=false
 WEBSCAN_REPO=../web-scan
 WEBSCAN_URL=http://127.0.0.1:8787
 ```
+
+已有 GLM-5.3-Flash 资源包时，可将 `ZHIPU_TEXT_MODEL` 改为 `glm-5.3-flash` 后重启。聊天主管、3D 专家的 ReAct 决策和 Creative MCP 的设计规划共用此配置；视觉审核与图片模型独立。GLM-5.3-Flash 是计量模型，赠送 token 不等于永久免费，资源包适用范围、有效期与剩余额度以智谱控制台为准；应用不会自动查询余额或在资源包耗尽前拦截，HTTP 错误也不会触发换模型或重试。[官方模型与计费说明](https://docs.bigmodel.cn/cn/guide/start/pricing)
 
 ```bash
 ./scripts/start-graphics.sh
@@ -76,13 +80,15 @@ WEBSCAN_URL=http://127.0.0.1:8787
 
 聊天入口采用主管与专家协作：`chat_supervisor → 普通回复 / delegate_3d_agent → 内置 MCP → 3D 工作队列`。每条聊天通常只调用模型一次；原生工具选择通过参数与单次委派检查后，由 MCP 受理并返回任务 ID。受理回执由程序展示，不把“已开始”说成“已完成”，也不等待重建结束才允许下一轮聊天。同一对话已有活动生成时拒绝重复委派，仍可继续普通对话。
 
-3D 专家保留 **ReAct**：`preflight → model ⇄ tools → finish`。`glm-4.7-flash` 通过 LangChain 原生 function calling 选择行动，工具结果作为 ToolMessage 返回模型，再由模型决定继续、检查任务或停止。专家收到主管整理的物件要求，不接收整段闲聊历史；任务 ID、供应商、训练参数和结果地址由程序绑定。
+3D 专家保留 **ReAct**：`preflight → model ⇄ tools → finish`。选定的文本模型（默认 `glm-4.7-flash`）通过 LangChain 原生 function calling 选择行动，工具结果作为 ToolMessage 返回模型，再由模型决定继续、检查任务或停止。专家收到主管整理的物件要求，不接收整段闲聊历史；任务 ID、供应商、训练参数和结果地址由程序绑定。
 
 模型可调用 `generate_reference`、`generate_multiview`、`import_views`、`reconstruct`、`validate_result`、`inspect_task`、`finish`、`stop`。生成工具封装已有 MCP 提交与等待；LangChain StructuredTool 仍通过官方 MCP SDK 执行底层调用。真实依赖仍由代码检查：只有参考图完成才能生成候选视图，审核通过才能导入，真实重建与产物验证通过才能完成。
 
 每个任务最多 **12 轮决策**，单次决策最多等待 45 秒、最多输出 1024 tokens，不自动重试模型请求。正常 3D 路径需要约 6 次决策调用，另有原来的设计规划和视觉审核；轮询不会消耗额外模型 token。每轮只执行一个工具，多工具批次整批拒绝；生成、导入、重建和验证各最多执行一次。实际工具失败后先清理下游，再让模型观察失败并检查或停止，不自动重新生图或续训。工具参数错误可在剩余决策预算内纠正。
 
 `finish` 和模型的最终文本都不能绕过证据检查：尚未验证产物就结束会得到失败状态，不能显示 3D 成功。页面不展示思维链；检查点保存工具调用和观察，API 提供 `agentLoop`、`agentRounds`、`agentActions`，健康接口报告 `agent_loop=react`。
+
+GLM-5.3-Flash 使用 `thinking.type=enabled`、`clear_thinking=true`、`reasoning_effort=low`，仍受原有请求时间和输出预算限制。若供应商返回 `reasoning_content`，适配器仅在当前任务内存中保存，原样回传给后续工具轮次；没有返回时不编造。它不进入 LangChain 消息、检查点、长期记忆或页面，任务结束/取消时清除，压缩上下文时同步移除旧轮次。临时思考内容不计入 12,000 JSON 字符的可见上下文预算；完整请求仍包含固定系统提示、工具 schema 与保留轮次的供应商字段。
 
 升级前停止旧 Java Agent 与旧 MCP，保留 `.graphics/`，安装上述依赖后重新启动。原任务地址、请求标识、图片和结果继续可读；未完成任务按旧规则查询并清理下游，不自动重发生图或续训。SQLite 检查点记录节点状态，但不提供未经副作用核对的自动断点重放；当前未开放手动 replay API。
 

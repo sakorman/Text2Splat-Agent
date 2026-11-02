@@ -18,7 +18,7 @@ class Creative:
     def health(self):
         return {"configured": bool(self.settings.zhipu_key), "image_provider": self.settings.image_provider,
                 "paid_enabled": self.settings.allow_paid, "reference_conditioned": self.settings.image_provider == "seedream",
-                "text_model": "glm-4.7-flash", "vision_model": "glm-4.6v-flash",
+                "text_model": self.settings.text_model, "vision_model": "glm-4.6v-flash",
                 "image_model": "cogview-3-flash" if self.settings.image_provider == "cogview" else "doubao-seedream-4-0-250828"}
 
     def reference(self, prompt, request_id):
