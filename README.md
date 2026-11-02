@@ -82,6 +82,25 @@ WEBSCAN_URL=http://127.0.0.1:8787
 
 升级前停止旧 Java Agent 与旧 MCP，保留 `.graphics/`，安装上述依赖后重新启动。原任务地址、请求标识、图片和结果继续可读；未完成任务按旧规则查询并清理下游，不自动重发生图或续训。SQLite 检查点记录节点状态，但不提供未经副作用核对的自动断点重放；当前未开放手动 replay API。
 
+## 长期记忆与上下文压缩
+
+不同任务保留各自完整消息历史，并通过本地 `memory.sqlite3` 共享选中的历史经验。任务结束后记录描述、结果类别和失败/审核原因；明确区分概念图、待审核、失败与经过产物验证的 3D。启动时补入旧任务记录，跳过取消和没有生成证据的配置失败。新任务从最近 300 条任务记忆中按中英文词项匹配检索最多 3 条相关经验，另带最多 4 条最新的明确偏好；这是轻量词项检索，不是向量语义搜索。
+
+只在你明确要求时记录长期偏好。例如在同一个描述框中输入：
+
+```text
+记住我的偏好：哑光青瓷。
+生成一个卷草纹花瓶
+```
+
+也识别独立一行的「请记住我喜欢……」和 `Remember that I prefer …`。描述中的普通材质形容词不会自动成为个人偏好。这类自然语言记录更新同一条偏好；命名偏好可通过下表 API 单独维护。当前描述优先，历史结果不会替代本次生成、审核或产物验证。
+
+ReAct 每轮对任务上下文做预算检查：超过 **12,000 个 JSON 字符**或 6 组完整工具交互时，用程序根据实际任务状态和工具回执整理的摘要压缩旧记录，优先保留最近 2 组完整交互。压力较大时先移除低优先级记忆，再整体移除旧交互；不会拆散工具调用和结果。原始描述、当前约束和剩余轮数不丢弃，无法容纳时明确停止。短上下文或不能缩短的摘要不强制压缩。这个预算不包含固定系统提示与工具定义，也不是精确 token 数；原始消息仍保存在检查点中。
+
+记忆检索和摘要不额外调用模型或 embedding API；实际送入决策上下文的记忆会随正常请求发给已配置的决策模型。任务 API 中 `memorySources` 列出检索来源，`contextStats.memoryItems` 表示最近一轮实际注入数量，其他统计展示压缩前后字符数。记忆库不可用时生成继续运行，健康接口 `memory.available=false`。
+
+可通过 API 查看、更新、删除单条或清空现有记忆。删除项有遗忘标记，重启不会从旧任务重新补回；之后明确更新同一偏好可以重新记住。删除只影响后续新任务检索，不删除原任务、图片、检查点或已运行任务载入的上下文。记忆按 `GRAPHICS_DATA_DIR` 隔离，当前仍为本机单用户服务。首页没有新增记忆或配置面板。
+
 ## 模型与重建路径
 
 ```text
@@ -123,6 +142,10 @@ curl http://127.0.0.1:8080/api/graphics/jobs \
 | GET | `/api/graphics/jobs/{id}/events` | SSE，事件名 `progress`，每次发送完整状态 |
 | POST | `/api/graphics/jobs/{id}/cancel` | 停止后续步骤并取消下游任务 |
 | GET | `/api/graphics/assets/{setId}/{name}` | 本地生成的 PNG，仅允许受控 ID 与文件名 |
+| GET | `/api/graphics/memories?limit=50&offset=0` | 分页查看记忆，limit 为 1–100 |
+| PUT | `/api/graphics/memories/preferences/{key}` | 明确保存偏好，JSON `{"value":"哑光青瓷"}`；内容 2–200 字，key 为 1–64 个小写字母、数字、下划线或短横线 |
+| DELETE | `/api/graphics/memories/{id}` | 删除指定 `pref:…` 或 `episode:…` 记忆 |
+| DELETE | `/api/graphics/memories` | 清空现有记忆，不删除任务与产物 |
 
 状态包括 `QUEUED / PLANNING / REFERENCE / MULTIVIEW / IMPORTING / RECONSTRUCTING / VALIDATING / READY`，以及 `CONCEPT_READY / NEEDS_REVIEW / FAILED / CANCELLING / CANCELLED`。
 
@@ -149,6 +172,7 @@ scripts/                     本地启动与进程管理
   assets/                    生成图片及清单
   mcp.sqlite3                生图任务、幂等与 web-scan 映射
   langgraph.sqlite3          LangGraph 消息/节点检查点（thread_id = 任务 ID）
+  memory.sqlite3             跨任务偏好、经验与遗忘标记
 ```
 
 web-scan 自己的数据库、训练缓存和 Gaussian 模型仍保存在它的数据目录。通过 `GRAPHICS_DATA_DIR` 修改 Agent 数据目录时，需要让 Agent 与两个 MCP 使用相同路径。不要同时启动多个 Agent 或同种 MCP 操作同一数据目录。
@@ -161,7 +185,7 @@ node --check agent/text2splat/static/graphics/studio.js
 node --test tests/*.test.mjs
 ```
 
-自动测试不调用外部模型，不消耗 token，也不启动 GPU 训练。覆盖任务状态、取消竞态、重启处理、丢失响应、幂等、外观检查失败、SfM 失败、产物缺失、HTTP 导入契约、MCP SDK 工具声明与 API 输入校验。
+自动测试不调用外部模型，不消耗 token，也不启动 GPU 训练。覆盖任务状态、取消竞态、重启处理、丢失响应、幂等、外观检查失败、SfM 失败、产物缺失、HTTP 导入契约、MCP SDK 工具声明与 API 输入校验，以及记忆检索/删除/重启、压缩预算和工具交互完整性。
 
 真实验收仍需配置个人 Key，分别尝试花瓶、香插、摆件，检查 12 张图、SfM 注册数量、PLY 和实际旋转观感。当前版本不宣称已完成真实生图到 3D 的质量验收。
 

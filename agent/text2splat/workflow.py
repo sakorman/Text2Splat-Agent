@@ -1,6 +1,7 @@
 """A bounded ReAct model/tool loop, with deterministic guards around MCP actions."""
 import asyncio
 import json
+import logging
 import time
 from typing import Annotated, TypedDict
 
@@ -10,6 +11,8 @@ from langgraph.graph.message import add_messages
 from pydantic import ValidationError
 
 from .react import ACTIONS, ReActModel
+from .context import prepare_context
+from .memory import MemoryStore
 from .store import TERMINAL, valid_id
 from .tools import TemporaryToolFailure, ToolFailure
 
@@ -29,6 +32,9 @@ class State(TypedDict, total=False):
     rounds: int
     failure: dict
     finished: bool
+    recalled_memories: list[dict]
+    context_summary: dict
+    context_stats: dict
 
 
 class Cancelled(Exception):
@@ -46,6 +52,8 @@ class Workflow:
     def __init__(self, settings, store, tools, checkpointer, model=None):
         self.settings, self.store, self.tools = settings, store, tools
         self.model = model if model is not None else ReActModel(settings)
+        self.memory = MemoryStore(settings.data_dir)
+        self.memory_available = True
         builder = StateGraph(State)
         nodes = {"preflight": self.preflight, "model": self.decide, "tools": self.act, "finish": self.finish}
         for name, fn in nodes.items():
@@ -64,10 +72,23 @@ class Workflow:
     async def start(self):
         # Preserve previous restart semantics. Checkpoints are inspectable but an
         # incomplete side effect is never blindly replayed with graph.ainvoke(None).
+        self.memory_call(lambda: self.memory.list(1), [])
         for job in self.store.list():
+            self.memory_call(lambda: self.memory.record_job(job), False)
             if job["status"] not in TERMINAL:
                 self.queue.put_nowait(("recover", job["id"]))
         self.worker = asyncio.create_task(self._consume(), name="text2splat-graph-worker")
+
+    def memory_call(self, operation, default):
+        try:
+            result = operation()
+            self.memory_available = True
+            return result
+        except Exception:
+            # A memory index failure must not invalidate generation or kill the worker.
+            self.memory_available = False
+            logging.getLogger(__name__).warning("Local memory unavailable; continuing without this memory operation")
+            return default
 
     async def close(self):
         if self.worker:
@@ -93,9 +114,13 @@ class Workflow:
         return job
 
     async def health(self):
+        self.memory_call(lambda: self.memory.list(1), [])
         result = {"engine": "langgraph", "tool_framework": "langchain", "agent_loop": "react",
                   "decision_model": "glm-4.7-flash", "decision_configured": bool(self.settings.zhipu_key),
                   "max_decisions": self.MAX_ROUNDS}
+        result["memory"] = {"long_term": "local_sqlite", "available": self.memory_available,
+                            "retrieval": "lexical", "context_budget_characters": 12000,
+                            "compression": "structured_summary_and_recent_exchanges"}
         for name in ("creative", "webscan"):
             try:
                 result[name] = await self.tools.call(name + "_health", {})
@@ -121,13 +146,17 @@ class Workflow:
                                       message="服务重启，原任务已中断；未自动重发生图或训练。" if clean else
                                       "服务重启，尚未确认下游停止。恢复 MCP 服务后再次取消。")
             finally:
+                self.memory_call(lambda: self.memory.record_job(self.store.get(jid)), False)
                 self.active = None
                 self.queue.task_done()
 
     async def run(self, jid):
         job = self.store.get(jid)
+        self.memory_call(lambda: self.memory.capture_explicit_preference(job["prompt"], jid), None)
+        recalled = self.memory_call(lambda: self.memory.recall(job["prompt"], jid), [])
+        self.store.update(jid, memorySources=[m["id"] for m in recalled])
         state = State(job_id=jid, prompt=job["prompt"], mode=job["mode"],
-                      deadline=time.time() + self.settings.job_timeout, rounds=0,
+                      deadline=time.time() + self.settings.job_timeout, rounds=0, recalled_memories=recalled,
                       messages=[HumanMessage(json.dumps({"description": job["prompt"], "mode": job["mode"]}, ensure_ascii=False))])
         try:
             await self.graph.ainvoke(state, {"configurable": {"thread_id": jid},
@@ -175,9 +204,13 @@ class Workflow:
         rounds = state["rounds"] + 1
         if rounds > self.MAX_ROUNDS:
             raise ToolFailure("Agent 已达到 12 轮决策上限，未继续调用模型或工具")
+        snapshot = {**self.observation({**state, "rounds": rounds}),
+                    "attempted_actions": self.store.get(state["job_id"]).get("agentActions", []),
+                    "generation_retry_allowed": False}
+        context = prepare_context(state["messages"], snapshot, state.get("recalled_memories", []))
         self.store.update(state["job_id"], agentLoop="react", agentRounds=rounds,
-                          message="正在根据当前结果决定下一步")
-        task = asyncio.create_task(self.model.ainvoke(state["messages"]))
+                          contextStats=context.stats, message="正在根据当前结果决定下一步")
+        task = asyncio.create_task(self.model.ainvoke(context.messages))
         until = time.monotonic() + self.settings.model_timeout
         try:
             while not task.done():
@@ -196,7 +229,8 @@ class Workflow:
         ids = [c.get("id") for c in reply.tool_calls]
         if any(not isinstance(i, str) or not i or len(i) > 160 for i in ids) or len(set(ids)) != len(ids):
             raise ToolFailure("Agent 工具调用标识无效，未执行工具")
-        return {"rounds": rounds, "messages": [AIMessage(content="", tool_calls=reply.tool_calls)]}
+        return {"rounds": rounds, "messages": [AIMessage(content="", tool_calls=reply.tool_calls)],
+                "context_summary": context.summary, "context_stats": context.stats}
 
     def observation(self, state):
         job = self.store.get(state["job_id"])

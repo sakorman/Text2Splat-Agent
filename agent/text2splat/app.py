@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import sqlite3
 from urllib.parse import urlsplit
 import uuid
 
@@ -71,6 +72,10 @@ class CreateRequest(BaseModel):
         return value.strip() if isinstance(value, str) else value
 
 
+class PreferenceRequest(BaseModel):
+    value: str = Field(min_length=2, max_length=200)
+
+
 def create_app(settings=None, tools=None, model=None):
     settings = settings or AgentSettings()
 
@@ -95,6 +100,8 @@ def create_app(settings=None, tools=None, model=None):
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request, exc):
+        if request.url.path.startswith("/api/graphics/memories"):
+            return JSONResponse({"message": "请检查记忆分页参数或提供 2–200 字偏好内容"}, status_code=400)
         return JSONResponse({"message": "请提供 2–2000 字描述和有效的生成模式"}, status_code=400)
 
     @app.exception_handler(ValueError)
@@ -116,6 +123,28 @@ def create_app(settings=None, tools=None, model=None):
     @app.get("/api/graphics/health")
     async def health():
         return await app.state.workflow.health()
+
+    def memory_operation(operation):
+        try:
+            return operation(app.state.workflow.memory)
+        except (sqlite3.Error, OSError):
+            raise RuntimeError("本地记忆库暂不可用") from None
+
+    @app.get("/api/graphics/memories")
+    async def memories(limit: int = 50, offset: int = 0):
+        return memory_operation(lambda m: m.list(limit, offset))
+
+    @app.put("/api/graphics/memories/preferences/{key}")
+    async def preference(key: str, body: PreferenceRequest):
+        return memory_operation(lambda m: m.set_preference(key, body.value))
+
+    @app.delete("/api/graphics/memories/{mid}")
+    async def forget_memory(mid: str):
+        return {"deleted": memory_operation(lambda m: m.forget(mid))}
+
+    @app.delete("/api/graphics/memories")
+    async def forget_memories():
+        return {"deleted": memory_operation(lambda m: m.forget())}
 
     @app.post("/api/graphics/jobs", status_code=202)
     async def create(body: CreateRequest, request: Request):

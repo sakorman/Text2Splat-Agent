@@ -30,11 +30,26 @@
 
 决策上限 12 轮，每轮输出上限 1024 tokens、等待上限 45 秒，每次只能选择一个工具；多调用批次不部分执行。代码记录有效操作意图，防止再次执行生成、导入、训练或验证。参数/阶段拒绝会返回观察，允许模型纠正；真实工具失败会先清理下游，后续只能检查失败或停止，保留 FAILED / NEEDS_REVIEW / CANCELLING 的原有语义。模型返回结束文本时仍检查证据，不能用声明替代真实 Gaussian PLY。
 
-`thread_id` 使用原任务 ID，AsyncSqliteSaver 在节点边界同步持久化工具调用与观察；原 JSON 记录继续服务页面，并在每次生图或训练提交前记录请求意图。模型回复中的解释、供应商 reasoning_content 和元数据不会写入检查点。不同任务使用独立消息历史，不自动共享上下文。
+`thread_id` 使用原任务 ID，AsyncSqliteSaver 在节点边界同步持久化工具调用与观察；原 JSON 记录继续服务页面，并在每次生图或训练提交前记录请求意图。模型回复中的解释、供应商 reasoning_content 和元数据不会写入检查点。不同任务使用独立消息历史，只有经过选择的长期偏好与任务经验进入新任务上下文。
 
 不在有副作用的节点配置 RetryPolicy，也不在服务重启时对未完成检查点直接调用 `ainvoke(None)`。已有意图只允许查询原结果；查询为空仍不重发提交。重启保留此前的中断清理行为。检查点与下游执行不是同一个事务，不能把该实现称为 exactly-once 或保证自动续跑。
 
 LangChain 的模型适配器显式关闭 SDK 重试（`max_retries=0`），限定智谱 Chat Completions 端点；ReAct 只发送供应商支持的 `tool_choice=auto`，不附带 JSON 模式、strict 或 parallel_tool_calls。MCP 内的文本规划 JSON 模式与视觉提示词 JSON 解析继续分别处理。图片接口没有统一的 ChatModel 契约，因此沿用已有供应商图片适配器。MCP 工具采用固定白名单和参数 schema，解析既有 `ok/data/error` 信封；不启用 LangChain 原生 MCP beta 或迁移 MCP v2。
+
+## 跨任务记忆与模型上下文
+
+`memory.py` 是项目自有 SQLite 记忆库，不是 LangGraph BaseStore，也没有引入向量数据库。它与 LangGraph 的每任务检查点分开持久化，按本机数据目录隔离。
+
+- 偏好：只接受记忆 API 明确写入，或描述中独立一行的「记住我的偏好：……」「请记住我喜欢……」及 `Remember that I prefer …` 等受支持格式。自然语言格式更新同一个 `explicit-description` 条目；不从普通物件描述推断用户画像。记录来源和时间，当前要求优先。
+- 任务经验：完成或确有生成证据的失败记录自动写入，启动时幂等补入旧任务。记录结果类别、描述、标题、审核/失败原因和来源任务 ID；不复制产物地址、路径、API 配置或完整对话。概念图不标为 3D，READY 还须有已验证 Gaussian PLY 记录。
+- 检索：每个新任务在开始时载入最多 4 条最新偏好，并在最近 300 条任务经验中用英文词项/中文双字重叠评分选出最多 3 条。没有匹配时不注入任务经验。其作用是相关历史参考，失败不代表已证明因果，历史成功不允许跳过当前步骤。
+- 遗忘：单条删除或清空都会写遗忘标记，防止启动回填复活；明确的新偏好更新允许重新记住。删除不会抹除旧任务文件、检查点和已载入上下文，影响后续新任务。数据库异常不阻断生成，健康接口暴露可用状态；记忆管理 API 返回服务不可用。
+
+`context.py` 只改变下一次模型请求的视图，不删 LangGraph 原始消息。任务消息超过 12,000 个 JSON 字符或 6 组完整交互时，使用当前程序状态与实际工具回执构建结构化摘要，优先保留最近 2 组交互。摘要带有已尝试操作、允许操作、验证状态与剩余决策数，不重置 12 轮预算。预算不含固定系统提示和工具 schema，不宣称是模型 token 上限。
+
+原始用户消息保持完整。摘要和历史记忆作为明确标注的数据消息送入；先移除低优先级历史记忆，再移除整组旧交互，确保原生 tool_call_id 一一配对。若摘要不能缩短且原上下文仍在预算内则保留原上下文；若原始描述和必要任务事实仍超预算，则停止决策而不静默截断。任务 `memorySources` 记录检索候选来源，`contextStats` 记录最近模型调用的压缩情况和实际记忆数量；检查点另存摘要及统计用于核查。
+
+本地检索与压缩不增加 LLM/embedding 请求，但选中的记忆内容会随正常决策请求发给已配置模型。未验证真实模型遵循记忆的效果或实际 token 节省量。管理 API 与示例见 README，不增加首页功能控件。
 
 ## MCP 工具契约
 
@@ -118,6 +133,8 @@ Agent 和 Creative MCP 都从本地 `.env` 读取同一个 `ZHIPU_API_KEY`，浏
 - [LangChain MCP 文档](https://docs.langchain.com/oss/python/langchain/mcp)
 
 - [ReAct 论文](https://arxiv.org/abs/2210.03629)
+- [LangChain 记忆概念](https://docs.langchain.com/oss/python/concepts/memory)
+- [LangChain 短期记忆与上下文管理](https://docs.langchain.com/oss/python/langchain/short-term-memory)
 - [LangGraph Workflows and agents](https://docs.langchain.com/oss/python/langgraph/workflows-agents)
 - [GLM-4.7-Flash 工具调用能力](https://docs.bigmodel.cn/cn/guide/models/free/glm-4.7-flash)
 - [智谱对话补全参数](https://docs.bigmodel.cn/api-reference/模型-api/对话补全)

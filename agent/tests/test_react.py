@@ -120,12 +120,15 @@ async def test_concept_mode_does_not_allow_3d_tools(rig):
     assert not tools.calls["creative_generate_multiview"] and not tools.calls["webscan_start_reconstruction"]
 
 
-async def test_two_jobs_do_not_share_model_context_or_artifacts(rig):
+async def test_two_jobs_share_selected_memory_but_not_live_context_or_artifacts(rig):
     workflow, _, _, _ = rig
     first = await complete(workflow, key="first")
     second = await complete(workflow, key="second")
     assert first["id"] != second["id"] and first["status"] == second["status"] == "READY"
-    assert len(workflow.model.history[0]) == len(workflow.model.history[6]) == 1
+    assert len(workflow.model.history[0]) == 1
+    assert all(isinstance(m, HumanMessage) for m in workflow.model.history[6])
+    assert "episode:" + first["id"] in workflow.model.history[6][1].content
+    assert second["memorySources"] == ["episode:" + first["id"]]
     for job in (first, second):
         state = await workflow.graph.aget_state({"configurable": {"thread_id": job["id"]}})
         assert state.values["job_id"] == job["id"] and state.values["rounds"] == 6
