@@ -7,7 +7,7 @@
     <title>Text2Splat Agent · 造物方舟</title>
     <meta
       name="description"
-      content="输入一段描述，生成可以旋转查看的 3D 模型。"
+      content="聊想法、问问题，也能把描述变成 3D 模型。"
     />
     <link rel="stylesheet" href="./studio.css" />
     <script type="module" src="./studio.js"></script>
@@ -20,28 +20,10 @@
     <main class="workspace">
       <section class="compose" aria-labelledby="page-title">
         <h1 id="page-title">让想法立起来</h1>
-        <p class="intro">输入一段描述，生成一个 3D 模型。</p>
-        <form id="create-form">
-          <label class="sr-only" for="prompt">描述你想生成的物件</label>
-          <div class="prompt-box">
-            <textarea
-              id="prompt"
-              name="prompt"
-              minlength="2"
-              maxlength="2000"
-              required
-              rows="5"
-              placeholder="描述你想生成的物件，比如：一只圆润的青瓷小鸟，浅青色釉面，翅膀带有细密的羽纹。"
-            ></textarea>
-            <div class="form-actions">
-              <button class="primary" id="create-button" type="submit">
-                生成 3D 模型
-              </button>
-            </div>
-          </div>
-          <p class="form-error" id="form-error" role="alert" hidden></p>
-        </form>
+        <p class="intro">聊想法、问问题，准备好了再开始创造。</p>
       </section>
+
+      <section id="conversation" class="conversation" aria-label="对话" role="log" aria-live="polite" hidden></section>
 
       <section
         class="progress"
@@ -62,6 +44,29 @@
         </button>
       </section>
 
+      <section class="composer" aria-label="发送消息">
+        <form id="create-form">
+          <label class="sr-only" for="prompt">输入消息</label>
+          <div class="prompt-box">
+            <textarea
+              id="prompt"
+              name="prompt"
+              minlength="1"
+              maxlength="2000"
+              required
+              rows="3"
+              placeholder="聊聊你的想法，或告诉我：生成一个浅青色釉面的陶瓷小鸟。"
+            ></textarea>
+            <div class="form-actions">
+              <button class="primary" id="create-button" type="submit">
+                发送
+              </button>
+            </div>
+          </div>
+          <p class="form-error" id="form-error" role="alert" hidden></p>
+        </form>
+      </section>
+
       <section class="result" id="result" hidden aria-label="生成的 3D 模型">
         <iframe
           id="viewer"
@@ -74,6 +79,7 @@
           <div id="result-actions" class="result-actions"></div>
         </div>
       </section>
+
     </main>
   </body>
 </html>

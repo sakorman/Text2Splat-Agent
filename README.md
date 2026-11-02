@@ -1,16 +1,17 @@
 # Text2Splat Agent · 造物方舟
 
-**基于 LangGraph + LangChain 的本地 3DGS Agent。** Text 表示文字描述，Splat 对应 3D Gaussian Splatting；通过内置 MCP 串联设计、生图与本机重建。
+**基于 LangGraph + LangChain 的对话与 3D 创作多 Agent。** 聊天主管负责日常问答、讨论和澄清，3D 专家通过内置 MCP 接受明确的生成委派。Text 表示文字描述，Splat 对应 3D Gaussian Splatting。
 
-一句话设计一个文创物件：生成参考图、尝试生成 12 张候选视图，在自己的电脑上运行 COLMAP + Brush，得到可旋转查看的 3D Gaussian 展品。
+可以先正常聊天，再让 Agent 按讨论的方案创建文创物件：生成参考图、尝试生成 12 张候选视图，在自己的电脑上运行 COLMAP + Brush，得到可旋转查看的 3D Gaussian 展品。
 
 **这是第一版可运行原型。** 默认选用智谱免费模型；免费文生图不具备可靠的参考图约束，多视角一致性与最终重建效果仍需真实样例验证。系统只在 web-scan 实际重建成功且存在 Gaussian PLY 后显示“3D 已完成”，不会用假模型或 STL 代替结果。
 
 ## 第一版包含什么
 
-- 极简生成页 `/graphics/`：一个描述输入框、一个「生成 3D 模型」按钮。自动执行完整流程，生成时显示进度并允许取消，成功后显示模型预览和下载；失败可修改描述重试，刷新当前任务地址可恢复进度。
-- 两个内置 MCP 服务，使用官方 MCP SDK 的 Streamable HTTP 协议。
-- 默认免费模型：`glm-4.7-flash` 做 ReAct 决策与整理设计、`cogview-3-flash` 生图、`glm-4.6v-flash` 检查外观。
+- 简洁聊天页 `/graphics/`：一个消息输入框、一个「发送」按钮，对话按需出现。普通聊天不创建生成任务；只有原生 `generate_3d_model` 工具调用通过检查才开始 3D 流程。生成期间仍可聊天，进度、取消与结果按需显示，无模式切换或 Agent 选择器。
+- 两个独立 LangGraph Agent：对话主管与后台 ReAct 3D 专家，各有消息上下文、检查点与工作队列。通过真正的内置 MCP 会话委派，不使用关键词匹配启动生成。
+- 两个 Streamable HTTP 图形 MCP 服务，另有一个使用官方 SDK 内存传输的生成委派 MCP，无需新开端口。
+- 默认免费模型：`glm-4.7-flash` 做聊天、工具选择、ReAct 决策与整理设计，`cogview-3-flash` 生图，`glm-4.6v-flash` 检查外观。
 - 可选 Seedream 4.0 参考图约束生成，必须通过本地配置显式开启付费，不自动降级到付费服务。
 - 接入已有 [web-scan](https://github.com/sakorman/web-scan)：导入图片、冻结采集、SfM、Brush 本地 GPU 训练、预览与下载。
 - 异步任务、本地持久化、请求幂等、取消传播、重启中断恢复、丢失提交响应后的任务查询；进度连接短暂中断时有限重试只读查询。
@@ -45,7 +46,7 @@ WEBSCAN_URL=http://127.0.0.1:8787
 
 打开 **http://127.0.0.1:8080/graphics/**。脚本启动两个 Python MCP 服务和 FastAPI/LangGraph Agent；检测到本机 web-scan 已运行时直接复用，否则尝试用 `WEBSCAN_REPO/.venv/bin/python` 启动它。Ctrl-C 只停止本次脚本启动的进程。修改 Python 代码后需重启服务；不会因开发热重载自动中断或重复执行生成。
 
-输入物件描述，点击「生成 3D 模型」。页面始终提交 `THREE_D` 任务，后台在生图前检查 web-scan、Brush 和模型密钥。中间图片、技术配置和历史列表不出现在主界面；旧任务和图片仍保存在本地，概念图模式保留为 API 调试能力。
+输入消息，点击「发送」。例如先聊「青瓷小鸟适合什么造型？」，讨论满意后再说「按刚才的方案生成一个 3D 模型」。聊天主管把完整物件要求交给生成工具后，后台才检查 web-scan、Brush 和生图配置。正常聊天只需聊天模型密钥，不要求图形 MCP 或 Brush 可用。中间图片、技术配置和会话历史侧栏不出现在主界面；旧任务、图片和旧链接仍保留，概念图模式仅供 API 调试。
 
 免费资格、限速和费用以供应商当前规则为准，本项目不提供免费额度，也不能保证供应商永远免费。
 
@@ -62,6 +63,7 @@ WEBSCAN_URL=http://127.0.0.1:8787
 | 服务 | 默认地址 | 用途 |
 | --- | --- | --- |
 | Agent / 工作台 | `127.0.0.1:8080` | 任务 API、页面和本地图片 |
+| 生成委派 MCP | 进程内，无监听端口 | `generate_3d_model` 将请求交给独立 3D Agent |
 | Creative MCP | `127.0.0.1:8766/mcp` | 设计、生图、外观检查 |
 | Web-scan MCP | `127.0.0.1:8767/mcp` | 包装已有本地重建 API |
 | Web-scan | `127.0.0.1:8787` | COLMAP、Brush、3D viewer 和产物 |
@@ -72,7 +74,9 @@ WEBSCAN_URL=http://127.0.0.1:8787
 
 当前版本固定使用 LangGraph **1.2.19**、LangChain **1.4.7**、langchain-openai **1.7.3** 和 SQLite checkpointer **3.1.3**。`langchain-openai` 在这里是智谱兼容接口适配器，不会改用 OpenAI 模型或启用新的收费服务。生图仍使用供应商专用 HTTP 接口。
 
-主循环采用 **ReAct**：`preflight → model ⇄ tools → finish`。`glm-4.7-flash` 通过 LangChain 原生 function calling 选择行动，工具结果作为 ToolMessage 返回模型，再由模型决定继续、检查任务或停止。模型可为原始描述补充渲染建议；任务 ID、供应商、训练参数和结果地址由程序绑定。
+聊天入口采用主管与专家协作：`chat_supervisor → 普通回复 / delegate_3d_agent → 内置 MCP → 3D 工作队列`。每条聊天通常只调用模型一次；原生工具选择通过参数与单次委派检查后，由 MCP 受理并返回任务 ID。受理回执由程序展示，不把“已开始”说成“已完成”，也不等待重建结束才允许下一轮聊天。同一对话已有活动生成时拒绝重复委派，仍可继续普通对话。
+
+3D 专家保留 **ReAct**：`preflight → model ⇄ tools → finish`。`glm-4.7-flash` 通过 LangChain 原生 function calling 选择行动，工具结果作为 ToolMessage 返回模型，再由模型决定继续、检查任务或停止。专家收到主管整理的物件要求，不接收整段闲聊历史；任务 ID、供应商、训练参数和结果地址由程序绑定。
 
 模型可调用 `generate_reference`、`generate_multiview`、`import_views`、`reconstruct`、`validate_result`、`inspect_task`、`finish`、`stop`。生成工具封装已有 MCP 提交与等待；LangChain StructuredTool 仍通过官方 MCP SDK 执行底层调用。真实依赖仍由代码检查：只有参考图完成才能生成候选视图，审核通过才能导入，真实重建与产物验证通过才能完成。
 
@@ -99,6 +103,8 @@ ReAct 每轮对任务上下文做预算检查：超过 **12,000 个 JSON 字符*
 
 记忆检索和摘要不额外调用模型或 embedding API；实际送入决策上下文的记忆会随正常请求发给已配置的决策模型。任务 API 中 `memorySources` 列出检索来源，`contextStats.memoryItems` 表示最近一轮实际注入数量，其他统计展示压缩前后字符数。记忆库不可用时生成继续运行，健康接口 `memory.available=false`。
 
+聊天也支持明确偏好与相关经验检索，并将完整会话保存在 `chat.sqlite3`。每轮优先带最近 6 轮完整对话，较早内容只保留有限用户消息摘录；总任务上下文同样限定为 12,000 个 JSON 字符，当前消息和真实生成状态受保护。摘录可能遗漏旧细节，不是语义摘要；关键要求可在当前消息重申。不同会话不共享原始对话，仍可共享选中的长期记忆。聊天检查点使用 `chat:{turnId}`，与生成任务分离。
+
 可通过 API 查看、更新、删除单条或清空现有记忆。删除项有遗忘标记，重启不会从旧任务重新补回；之后明确更新同一偏好可以重新记住。删除只影响后续新任务检索，不删除原任务、图片、检查点或已运行任务载入的上下文。记忆按 `GRAPHICS_DATA_DIR` 隔离，当前仍为本机单用户服务。首页没有新增记忆或配置面板。
 
 ## 模型与重建路径
@@ -121,6 +127,18 @@ ReAct 每轮对任务上下文做预算检查：超过 **12,000 个 JSON 字符*
 
 ## API
 
+正常入口是聊天，不自动创建 3D 任务：
+
+```bash
+curl http://127.0.0.1:8080/api/graphics/chat \
+  -H 'Content-Type: application/json' -H 'Idempotency-Key: first-chat-message' \
+  -d '{"message":"你好，先聊聊青瓷小鸟的造型"}'
+```
+
+立即返回 `202`、消息 ID 和 `conversationId`；查询消息直到 `COMPLETED` 或 `FAILED`，下一条传相同 `conversationId`。页面保存提交标识后再发送，`?chat_request=` 恢复未确认消息、`?chat=` 恢复会话与关联任务，刷新只读查询。已受理消息不会因浏览器断线被重发；服务重启标记未完成回复中断，已有委派只查询原任务，不重放模型或生成调用。
+
+以下是保留的显式生成兼容接口，`THREE_D` 也通过同一内置 MCP 边界：
+
 ```bash
 curl http://127.0.0.1:8080/api/graphics/jobs \
   -H 'Content-Type: application/json' \
@@ -128,13 +146,17 @@ curl http://127.0.0.1:8080/api/graphics/jobs \
   -d '{"prompt":"一个青瓷卷草纹花瓶，哑光表面","mode":"THREE_D"}'
 ```
 
-页面在提交前将请求标识与描述保存在当前标签页的 `sessionStorage`。即使服务器接受任务后响应丢失，刷新也只查询原任务，不自动重发生成；尚未找到时，手动重试相同描述会复用原标识。确认任务 ID 后清除待确认记录。浏览器存储不可用时停止提交，避免产生无法恢复的重复请求。
+旧页面留下的 `?job=`、`?request=` 和原提交记录继续只读恢复。新版页面不直接 POST `/jobs`，所有输入先交给聊天主管。浏览器存储不可用时停止发送，避免产生无法恢复的重复请求。
 
 接口立即返回 `202` 和任务 ID。同一 `Idempotency-Key` 与相同请求返回同一个任务；变更描述请使用新 key。`parentJobId` 可记录版本关系，新版本会重新生成参考图。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/graphics/health` | MCP 配置及本地 Brush 状态，不返回密钥 |
+| POST | `/api/graphics/chat` | `message`（1–2000 字）、可选 `conversationId`；正常聊天或模型自主委派 |
+| GET | `/api/graphics/chats/{id}` | 当前对话全部消息与最新关联生成任务 |
+| GET | `/api/graphics/chat/turns/{id}` | 消息状态、回复、可选委派来源和 jobId |
+| GET | `/api/graphics/chat/requests/{key}` | 只读恢复已受理消息，不调用模型或生成 |
 | POST | `/api/graphics/jobs` | `prompt`、`mode`（`CONCEPT` / `THREE_D`）、可选 `parentJobId` |
 | GET | `/api/graphics/jobs` | 最近 50 个任务 |
 | GET | `/api/graphics/jobs/{id}` | 完整状态与结果 |
@@ -162,7 +184,7 @@ curl http://127.0.0.1:8080/api/graphics/jobs \
 工具表、调用约束、部署结构和验收清单见 [技术方案](docs/graphics-agent.md)。实现都在本仓库，**没有修改 web-scan 仓库**，它通过现有 HTTP API 被复用。
 
 ```text
-agent/text2splat/             ReAct 模型/工具循环、LangChain 工具、FastAPI
+agent/text2splat/             对话主管、3D ReAct 专家、内置 MCP、FastAPI
 agent/text2splat/static/graphics/  无构建依赖的工作台
 agent/tests/                  工作流、检查点、API 与真实 MCP SDK 测试
 mcp/graphics_mcp/             Creative / Web-scan MCP
@@ -173,6 +195,7 @@ scripts/                     本地启动与进程管理
   mcp.sqlite3                生图任务、幂等与 web-scan 映射
   langgraph.sqlite3          LangGraph 消息/节点检查点（thread_id = 任务 ID）
   memory.sqlite3             跨任务偏好、经验与遗忘标记
+  chat.sqlite3               会话、消息提交意图、回复与生成任务关联
 ```
 
 web-scan 自己的数据库、训练缓存和 Gaussian 模型仍保存在它的数据目录。通过 `GRAPHICS_DATA_DIR` 修改 Agent 数据目录时，需要让 Agent 与两个 MCP 使用相同路径。不要同时启动多个 Agent 或同种 MCP 操作同一数据目录。

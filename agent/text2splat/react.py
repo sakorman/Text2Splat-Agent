@@ -51,6 +51,10 @@ CONCEPT 只需参考图和 finish。你可以依据证据选择停止，而不�
 
 
 class ReActModel:
+    system = SYSTEM
+    definitions = TOOL_DEFINITIONS
+    retain_text = False
+
     def __init__(self, settings, transport=None):
         self.settings, self.transport = settings, transport
 
@@ -66,9 +70,9 @@ class ReActModel:
                     max_retries=0, timeout=self.settings.model_timeout,
                     stream_usage=False, use_responses_api=False,
                     extra_body={"max_tokens": 1024, "thinking": {"type": "disabled"}},
-                ).bind_tools(TOOL_DEFINITIONS, tool_choice="auto")
+                ).bind_tools(self.definitions, tool_choice="auto")
                 # No unsupported parallel_tool_calls/strict or JSON-mode parameters.
-                reply = await model.ainvoke([SystemMessage(SYSTEM), *messages])
+                reply = await model.ainvoke([SystemMessage(self.system), *messages])
         except APIStatusError as exc:
             raise ToolFailure(f"Agent 决策模型返回 HTTP {exc.status_code}；未自动重试") from None
         except APIConnectionError:
@@ -78,5 +82,7 @@ class ReActModel:
         if (not isinstance(reply, AIMessage) or reply.invalid_tool_calls
                 or reply.response_metadata.get("finish_reason") in {"length", "content_filter"}):
             raise ToolFailure("Agent 工具调用格式无效或被截断，未执行工具")
-        # Persist only actions, never provider reasoning text, metadata or arbitrary final claims.
-        return AIMessage(content="", tool_calls=reply.tool_calls)
+        # 3D decisions retain actions only; the chat subclass also keeps the visible reply.
+        # Neither retains provider reasoning text or metadata.
+        content = reply.content if self.retain_text and isinstance(reply.content, str) else ""
+        return AIMessage(content=content[:8000], tool_calls=reply.tool_calls)

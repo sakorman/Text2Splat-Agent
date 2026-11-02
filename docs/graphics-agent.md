@@ -2,19 +2,21 @@
 
 ## 目标与范围
 
-输入一句物件描述，无需上传照片。默认使用免费模型 API 生成设计和图片，计算阶段复用本机 web-scan 的 COLMAP 与 Brush。用户通过一个输入框和一个「生成 3D 模型」按钮启动完整流程，交付通过真实重建后才能打开的 3D 展品。参考图与候选视图是后台中间产物，概念图模式仅保留在 API 中供调试。
+用户可正常聊天、讨论和澄清设计；只有聊天主管原生调用 `generate_3d_model` MCP 工具后，才交给独立 3D Agent 生成。无需上传照片，默认使用免费模型 API 生成设计和图片，计算阶段复用本机 web-scan 的 COLMAP 与 Brush。真实重建验证通过才交付 3D 展品；概念图模式保留在兼容 API 中供调试。
 
 第一版面向单个静态、不透明、带表面纹理的文创物件。透明玻璃、镜面金属、复杂镂空、大场景、动画和可制造精确网格不在本版本验收范围。Gaussian 表示不等于 CAD / STL，也不能承诺准确背面结构。
 
 ## 界面约束
 
-主界面只保留描述输入和生成按钮，不增加模式切换、历史列表、示例按钮、服务状态面板或多视图缩略图。生成期间显示单条阶段状态和取消操作，完成后显示模型预览与下载。提交固定使用 `THREE_D`，生成期间禁用重复提交；刷新带任务 ID 的地址恢复进度，不发起新的模型请求。失败时保留描述和可操作的原因；旧概念图任务不能显示为 3D 成功。后续定时优化应保持这个单一入口。
+主界面保持一个消息输入框和「发送」按钮，按需出现当前对话、生成进度、取消和模型结果，不增加模式切换、Agent 选择器、历史侧栏或技术面板。消息先 POST 聊天接口，正常回复不创建生成任务；生成过程中仍可聊天，等待本轮回复时才暂时禁用发送。同一会话有活动生成时拒绝重复委派。刷新对话或旧任务链接只恢复状态，不发起新的模型请求；旧概念图不能显示为 3D 成功。
 
 ## 组件与边界
 
 | 组件 | 职责 | 数据 / 调用 |
 | --- | --- | --- |
-| LangGraph + FastAPI Agent | ReAct 循环、持久化任务、取消、SSE、前端 | SQLite 检查点、兼容旧 JSON，LangChain MCP 工具 |
+| 对话主管 ChatAgent | 通用问答、上下文、工具选择、委派 | chat.sqlite3、chat:{turnId} 检查点、LangChain ChatModel |
+| 生成委派 MCP | 将有效生成请求交给 3D 专家 | 官方 MCP 内存传输；真实 initialize / tools/call |
+| 3D 专家 Workflow | ReAct 生成循环、任务持久化、取消 | 独立工作队列/检查点、旧 JSON、LangChain MCP 工具 |
 | Creative MCP | GLM 设计规格、CogView / Seedream 图片、GLM 视觉检查 | SQLite 生图队列、本地图片 |
 | Web-scan MCP | 翻译为现有 web-scan API、幂等导入和训练提交 | 资产集合 ID → session ID → job ID |
 | web-scan | 图片验证、SfM、Brush、本地导出 | 原有数据库、队列和 artifacts |
@@ -22,7 +24,19 @@
 
 模型负责下一步行动选择、设计内容与外观判断。LangGraph 执行模型—工具循环，LangChain 绑定原生工具调用及文本/视觉模型。训练轮询由异步工作队列完成，不让大模型反复消耗 token 查询进度。MCP 只交换 ID、小型元数据和结果链接，不将 PLY 或大批图片塞进模型上下文。
 
-## ReAct 主循环与检查点
+## 多 Agent 委派与聊天
+
+`chat.py` 的 LangGraph 主管能直接回复普通问题，也可通过 LangChain 原生 function calling 选择 `generate_3d_model`。提示词明确将提及 3D、否定请求、引用命令、咨询和头脑风暴视为聊天，要求生成意图不明确时澄清。代码不使用关键词匹配启动任务；只有完整、单个、白名单内且参数有效的原生调用才进入委派节点。语义意图由模型判断，尚未通过真实模型误触发率评估，不能宣称完全杜绝模型误判。
+
+主管每消息一次模型请求，最多 45 秒、1024 输出 tokens，关闭 SDK 重试。异步委派成功即返回程序生成的受理回执，不再花一次模型请求改写，也不声称 3D 已完成。专家是独立的有状态 ReAct Agent，不只是一次生图函数；它自行选择后续图形工具，运行时与主管工作队列分离，用户可以继续聊天。不是任意多 Agent 自动组队，也不新增没有实际职责的角色。
+
+`generation_mcp.py` 使用 FastMCP 与官方 `create_connected_server_and_client_session`，通过真实 MCP 消息的内存传输连接 ClientSession；没有新增 HTTP 端口。模型仅提供 description，请求标识由程序绑定。内部 MCP 另外支持 request_id、兼容接口的 parent_job_id，这些字段不暴露给模型。同一对话有活动任务时拒绝新委派。原 `/jobs` 的显式 THREE_D 请求也通过此工具，不从网页绕过它直接提交。
+
+`chat_store.py` 原子保存会话、消息幂等键及委派意图。MCP 响应丢失时只按已记录标识查原任务，不重发；重启对尚未完成消息只标记中断或重新关联已记录任务，不重放模型调用和副作用。GET 会话/消息/请求接口均只读。聊天没有图形服务预检；仅在真正委派后由专家执行原有预检。健康接口仍可单独查询图形服务。
+
+聊天上下文带最新真实任务状态、选中的长期记忆和最多 6 轮完整对话；较早内容是有限用户消息摘录。超出 12,000 个 JSON 字符预算时先减少记忆，再整体减少旧轮次/摘录，不截断当前消息与必要状态。原始会话保留在 SQLite；摘录不保证保留全部旧设计细节。明确偏好可通过聊天写入，来源记录为 source_turn_id；普通聊天不生成任务经验。前端以 textContent 展示模型文本，不执行 HTML。
+
+## 3D 专家 ReAct 循环与检查点
 
 `agent/text2splat/workflow.py` 的 StateGraph 为 `preflight → model ⇄ tools → finish`，不再通过固定边依次调用全部阶段。`react.py` 用 LangChain `bind_tools` 将工具 schema 提交给 GLM-4.7-Flash；模型产生原生 tool_calls，执行结果以对应 tool_call_id 的 ToolMessage 返回，驱动下一轮决策。它不依赖解析文本中的 Thought/Action，也不要求输出思维链。
 
@@ -53,10 +67,11 @@ LangChain 的模型适配器显式关闭 SDK 重试（`max_retries=0`），限�
 
 ## MCP 工具契约
 
-两个服务都只监听 loopback，使用 `/mcp` Streamable HTTP、官方 Python SDK FastMCP 与 ClientSession；Agent 端包装成 LangChain StructuredTool。工具统一返回 `{"ok":true,"data":...}` 或 `{"ok":false,"error":"可展示错误"}`。
+Creative 与 Web-scan 两个服务只监听 loopback，使用 `/mcp` Streamable HTTP；新增生成委派 MCP 仅在 Agent 进程内。均使用官方 SDK；底层图形工具由 LangChain StructuredTool 包装。统一返回 `{"ok":true,"data":...}` 或 `{"ok":false,"error":"可展示错误"}`。
 
 | 工具 | 输入 | 返回 |
 | --- | --- | --- |
+| `generate_3d_model` | description、程序绑定的 request_id、可选 parent_job_id | 已受理的 3D 专家任务；不是已完成模型 |
 | `creative_health` | 无 | 模型、配置状态，不返回密钥 |
 | `creative_generate_reference` | `prompt`, `request_id` | 立即返回生图任务 ID |
 | `creative_generate_multiview` | `reference_id`, `request_id` | 立即返回多视图任务 ID |
@@ -86,8 +101,8 @@ LangChain 的模型适配器显式关闭 SDK 重试（`max_retries=0`），限�
 
 ## 任务可靠性
 
-- 前端使用 `Idempotency-Key`；相同 key 和内容复用任务，内容冲突返回 400。提交前把原请求写入标签页 `sessionStorage` 并设置 `?request=` 地址；响应丢失后刷新只调用 `GET /api/graphics/requests/{key}` 找回任务，未找到时保留标识供手动重试，不自动生成。确认任务 ID 后清理提交记录。
-- Agent 单异步工作队列，最多 16 个活动任务；Creative 单工作线程，最多 32 个活动任务。
+- 聊天前端使用 `Idempotency-Key`，相同 key/内容/对话复用消息，冲突返回 400。发送前写入 `sessionStorage` 与 `?chat_request=`；受理后改为 `?chat=`，恢复只调用 GET 消息/会话接口。未确认消息不能被另一条发送悄悄替换；旧生成请求记录仍只读恢复。
+- 主管和 3D 专家各有异步工作队列，各最多 16 个待处理项；同一对话同时仅一个待回复消息，但与生成并行。Creative 单工作线程，最多 32 个活动任务。
 - 生成提交前写入请求标识。响应丢失时按标识查询并清理遗留任务，不重新请求图片。
 - Agent 任务文件原子替换并兼容旧 Java JSON；LangGraph 节点状态写入独立 SQLite 检查点；MCP SQLite WAL 记录幂等映射。每个服务使用进程文件锁避免重复启动。
 - 下游导入按资产集合复用采集；web-scan 本身进一步去重。训练启动前保存采集 ID 与完整预设；已有启动意图的同一请求只做查询，不重发训练 POST。响应丢失时必须唯一匹配采集与参数，确认后持久化任务 ID；零个或多个匹配均保留未知状态，不能取列表首项作为取消目标。启动响应自身也核对采集与参数，发现其他参数的活动任务时不发送新训练请求。旧意图按此前固定预设兼容查询。
@@ -135,6 +150,8 @@ Agent 和 Creative MCP 都从本地 `.env` 读取同一个 `ZHIPU_API_KEY`，浏
 - [ReAct 论文](https://arxiv.org/abs/2210.03629)
 - [LangChain 记忆概念](https://docs.langchain.com/oss/python/concepts/memory)
 - [LangChain 短期记忆与上下文管理](https://docs.langchain.com/oss/python/langchain/short-term-memory)
+- [LangChain Subagents](https://docs.langchain.com/oss/python/langchain/multi-agent/subagents)
+- [MCP Python SDK v1.30 内存传输源码](https://github.com/modelcontextprotocol/python-sdk/blob/v1.30.0/src/mcp/shared/memory.py)
 - [LangGraph Workflows and agents](https://docs.langchain.com/oss/python/langgraph/workflows-agents)
 - [GLM-4.7-Flash 工具调用能力](https://docs.bigmodel.cn/cn/guide/models/free/glm-4.7-flash)
 - [智谱对话补全参数](https://docs.bigmodel.cn/api-reference/模型-api/对话补全)

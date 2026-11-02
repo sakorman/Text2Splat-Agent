@@ -1,8 +1,8 @@
 import {
   readPendingRequest,
-  preparePendingRequest,
   clearPendingRequest,
 } from "./request-journal.mjs";
+import { readPendingChat, preparePendingChat, clearPendingChat } from "./chat-journal.mjs";
 import { terminal, acceptsJobUpdate } from "./job-updates.mjs";
 
 const $ = (id) => document.getElementById(id);
@@ -15,7 +15,8 @@ const stages = {
   RECONSTRUCTING: "正在构建 3D 模型，可能需要一些时间。",
   VALIDATING: "正在检查生成的模型…",
 };
-let current, events, pendingRequest;
+let current, events, pendingRequest, pendingChat;
+let conversationId = null, turns = [], pendingTurn = null, chatPoll;
 let submitting = false;
 let restoring = false;
 const pendingCancellations = new Set();
@@ -37,17 +38,10 @@ function showError(message) {
   $("form-error").hidden = !message;
 }
 function updateControls() {
-  const running = current && !terminal.has(current.status);
-  $("prompt").disabled = submitting || restoring || !!running;
-  $("create-button").disabled = submitting || restoring || !!running;
+  $("prompt").disabled = submitting || restoring || !!pendingTurn;
+  $("create-button").disabled = submitting || restoring || !!pendingTurn;
   $("cancel-button").disabled = pendingCancellations.has(current?.id);
-  $("create-button").textContent = submitting
-    ? "正在提交…"
-    : restoring
-      ? "正在恢复进度…"
-      : running
-        ? "正在生成…"
-        : "生成 3D 模型";
+  $("create-button").textContent = submitting ? "正在发送…" : restoring ? "正在恢复…" : pendingTurn ? "正在回复…" : "发送";
 }
 function safeLocalUrl(value) {
   if (typeof value !== "string" || !value) return null;
@@ -101,19 +95,19 @@ function render(job) {
             ? "这个旧任务只生成了图片"
             : "正在生成 3D 模型";
   $("progress-message").textContent = ready
-    ? ""
+    ? "模型预览在下方，可滚动查看。"
     : failed
       ? failureMessage(job)
       : job.status === "CONCEPT_READY"
-        ? "点击「生成 3D 模型」，用这段描述开始完整生成。"
+        ? "这是此前的概念图片任务。如需 3D 模型，请在对话中提出生成要求。"
         : job.status === "CANCELLING"
           ? "正在停止后续步骤；尚未确认停止时，可再次取消。"
           : job.status === "CANCELLED"
-            ? "可以修改描述，再生成一次。"
+            ? "可以继续聊天，准备好了再提出新的生成要求。"
             : job.connectionRetry > 0
               ? "进度连接暂时中断，正在恢复；无需重新生成。"
               : stages[job.status] || "正在处理，请稍候…";
-  $("progress-message").hidden = ready;
+  $("progress-message").hidden = false;
   $("cancel-button").hidden = done;
   $("cancel-button").textContent =
     job.status === "CANCELLING" ? "再次取消" : "取消生成";
@@ -164,11 +158,66 @@ function watch(id) {
   };
 }
 function openJob(job) {
+  if (current?.id === job.id) {
+    if (acceptsJobUpdate(current, job, job.id)) render(job);
+    return;
+  }
   events?.close();
-  $("prompt").value = job.prompt;
-  window.history.replaceState(null, "", `?job=${job.id}`);
   render(job);
   if (!terminal.has(job.status)) watch(job.id);
+}
+function renderConversation() {
+  const log = $("conversation");
+  const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
+  const nodes = [];
+  for (const turn of turns) {
+    for (const [role, text] of [["user", turn.message], ["assistant", turn.assistant || "正在回复…"]]) {
+      const row = document.createElement("div");
+      row.className = "chat-message " + role;
+      if (role === "assistant" && turn.status === "FAILED") row.classList.add("chat-error");
+      const label = document.createElement("span");
+      label.className = "chat-label";
+      label.textContent = role === "user" ? "你" : "造物方舟";
+      const content = document.createElement("p");
+      content.textContent = text;
+      row.append(label, content);
+      nodes.push(row);
+    }
+  }
+  log.replaceChildren(...nodes);
+  log.hidden = !turns.length;
+  document.querySelector(".workspace").classList.toggle("has-conversation", !!turns.length);
+  if (atBottom) log.scrollTop = log.scrollHeight;
+}
+async function openConversation(cid) {
+  const data = await api("/chats/" + cid);
+  conversationId = cid;
+  turns = data.turns;
+  window.history.replaceState(null, "", `?chat=${cid}`);
+  renderConversation();
+  if (data.latestJob) openJob(data.latestJob);
+  const waiting = turns.find(t => !["COMPLETED", "FAILED"].includes(t.status));
+  clearTimeout(chatPoll);
+  pendingTurn = waiting?.id || null;
+  if (waiting) pollTurn(waiting.id);
+  updateControls();
+}
+function pollTurn(id) {
+  clearTimeout(chatPoll);
+  chatPoll = setTimeout(async () => {
+    if (pendingTurn !== id) return;
+    try {
+      const turn = await api("/chat/turns/" + id);
+      if (["COMPLETED", "FAILED"].includes(turn.status)) {
+        await openConversation(turn.conversationId);
+        showError("");
+        return;
+      }
+    } catch (error) {
+      showError("回复连接暂时中断，正在重连。刷新可恢复，不会重复发送。");
+    }
+    pollTurn(id);
+  }, 800);
 }
 $("prompt").addEventListener("input", () => {
   $("prompt").setCustomValidity("");
@@ -176,39 +225,36 @@ $("prompt").addEventListener("input", () => {
 });
 $("create-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (submitting || restoring || (current && !terminal.has(current.status)))
-    return;
-  const prompt = $("prompt").value.trim();
-  if (prompt.length < 2) {
-    $("prompt").setCustomValidity("请至少输入两个字，描述你想生成的物件。");
+  if (submitting || restoring || pendingTurn) return;
+  const message = $("prompt").value.trim();
+  if (!message) {
+    $("prompt").setCustomValidity("请输入消息。");
     $("prompt").reportValidity();
     return;
   }
   showError("");
   submitting = true;
   updateControls();
-  const body = JSON.stringify({ prompt, mode: "THREE_D" });
+  const body = JSON.stringify({ message, conversationId });
   try {
-    // Persist the intent before POST: a reload can look up an accepted job without replaying it.
-    pendingRequest = preparePendingRequest(sessionStorage, body);
-    window.history.replaceState(null, "", `?request=${pendingRequest.key}`);
-    const job = await api("/jobs", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Idempotency-Key": pendingRequest.key,
-      },
-      body,
+    pendingChat = preparePendingChat(sessionStorage, body);
+    window.history.replaceState(null, "", `?chat_request=${pendingChat.key}`);
+    const turn = await api("/chat", {
+      method: "POST", headers: {"Content-Type": "application/json", "Idempotency-Key": pendingChat.key}, body,
     });
-    openJob(job);
-    clearPendingRequest(sessionStorage, pendingRequest.key);
-    pendingRequest = null;
+    // The server accepted this turn; its conversation URL can now recover it read-only.
+    window.history.replaceState(null, "", `?chat=${turn.conversationId}`);
+    clearPendingChat(sessionStorage, pendingChat.key);
+    pendingChat = null;
+    $("prompt").value = "";
+    conversationId = turn.conversationId;
+    pendingTurn = turn.id;
+    if (!turns.some(t => t.id === turn.id)) turns.push(turn);
+    renderConversation();
+    pollTurn(turn.id);
+    await openConversation(turn.conversationId);
   } catch (error) {
-    showError(
-      error instanceof TypeError
-        ? "连接失败，请检查本地服务后重试。"
-        : error.message,
-    );
+    showError(error instanceof TypeError ? "连接失败，请刷新恢复原消息或重试。" : error.message);
   } finally {
     submitting = false;
     updateControls();
@@ -232,40 +278,47 @@ $("cancel-button").addEventListener("click", async () => {
 });
 async function restoreSubmission() {
   const query = new URLSearchParams(location.search);
-  const selected = query.get("job");
-  const requestKey = query.get("request");
-  const validJob = selected && /^[a-f0-9]{32}$/.test(selected);
-  const validRequest =
-    requestKey &&
-    /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(requestKey);
   restoring = true;
   updateControls();
   try {
-    pendingRequest = readPendingRequest(sessionStorage);
-    if (validJob) {
-      const job = await api("/jobs/" + selected);
-      openJob(job);
-      if (pendingRequest?.key === job.requestKey) {
-        clearPendingRequest(sessionStorage, pendingRequest.key);
-        pendingRequest = null;
+    pendingChat = readPendingChat(sessionStorage);
+    const key = query.get("chat_request") || pendingChat?.key;
+    if (key) {
+      if (!/^[a-zA-Z0-9._:-]{1,160}$/.test(key)) throw new Error("消息标识无效");
+      if (pendingChat?.key === key) {
+        const body = JSON.parse(pendingChat.body);
+        $("prompt").value = body.message;
+        conversationId = body.conversationId;
       }
+      const turn = await api("/chat/requests/" + key);
+      clearPendingChat(sessionStorage, key);
+      pendingChat = null;
+      $("prompt").value = "";
+      await openConversation(turn.conversationId);
       return;
     }
-    const key = validRequest ? requestKey : pendingRequest?.key;
-    if (!key) return;
-    if (pendingRequest?.key === key)
-      $("prompt").value = JSON.parse(pendingRequest.body).prompt;
-    // Read-only recovery: refreshing must never start image generation.
-    const job = await api("/requests/" + key);
-    openJob(job);
-    clearPendingRequest(sessionStorage, key);
-    pendingRequest = null;
+    const cid = query.get("chat");
+    if (cid) {
+      if (!/^[a-f0-9]{32}$/.test(cid)) throw new Error("对话标识无效");
+      await openConversation(cid);
+      return;
+    }
+    // Preserve old job links and unresolved pre-chat submissions without replaying them.
+    pendingRequest = readPendingRequest(sessionStorage);
+    const selected = query.get("job");
+    const requestKey = query.get("request") || pendingRequest?.key;
+    if (selected) {
+      const job = await api("/jobs/" + selected);
+      openJob(job);
+      if (pendingRequest?.key === job.requestKey) clearPendingRequest(sessionStorage, pendingRequest.key);
+    } else if (requestKey) {
+      const job = await api("/requests/" + requestKey);
+      window.history.replaceState(null, "", `?job=${job.id}`);
+      openJob(job);
+      clearPendingRequest(sessionStorage, requestKey);
+    }
   } catch (error) {
-    showError(
-      error.status === 404 && !validJob
-        ? "上次提交尚未确认。点击「生成 3D 模型」重试，同一描述会沿用原提交记录。"
-        : error.message,
-    );
+    showError(error.status === 404 && pendingChat ? "上次消息尚未确认，请重试原消息，会沿用原提交标识。" : error.message);
   } finally {
     restoring = false;
     updateControls();

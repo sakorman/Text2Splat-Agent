@@ -21,6 +21,8 @@ from .settings import AgentSettings
 from .store import JobStore, TERMINAL, valid_id
 from .tools import McpTools
 from .workflow import Workflow
+from .chat import ChatAgent
+from .generation_mcp import GenerationMCP
 
 STATIC = Path(__file__).parent / "static" / "graphics"
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
@@ -76,7 +78,17 @@ class PreferenceRequest(BaseModel):
     value: str = Field(min_length=2, max_length=200)
 
 
-def create_app(settings=None, tools=None, model=None):
+class ChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)
+    conversationId: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
+
+    @field_validator("message", mode="before")
+    @classmethod
+    def strip_message(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+
+def create_app(settings=None, tools=None, model=None, chat_model=None):
     settings = settings or AgentSettings()
 
     @asynccontextmanager
@@ -88,9 +100,16 @@ def create_app(settings=None, tools=None, model=None):
                 workflow = Workflow(settings, store, tools or McpTools(settings), saver, model=model)
                 app.state.store, app.state.workflow = store, workflow
                 await workflow.start()
+                chat = None
                 try:
+                    generation = GenerationMCP(workflow)
+                    chat = ChatAgent(settings, workflow, generation, saver, model=chat_model)
+                    app.state.generation, app.state.chat = generation, chat
+                    await chat.start()
                     yield
                 finally:
+                    if chat:
+                        await chat.close()
                     await workflow.close()
         finally:
             store.close()
@@ -100,6 +119,8 @@ def create_app(settings=None, tools=None, model=None):
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request, exc):
+        if request.url.path.startswith("/api/graphics/chat"):
+            return JSONResponse({"message": "请输入 1–2000 字消息和有效的对话标识"}, status_code=400)
         if request.url.path.startswith("/api/graphics/memories"):
             return JSONResponse({"message": "请检查记忆分页参数或提供 2–200 字偏好内容"}, status_code=400)
         return JSONResponse({"message": "请提供 2–2000 字描述和有效的生成模式"}, status_code=400)
@@ -122,7 +143,30 @@ def create_app(settings=None, tools=None, model=None):
 
     @app.get("/api/graphics/health")
     async def health():
-        return await app.state.workflow.health()
+        result = await app.state.workflow.health()
+        result["agents"] = ["chat_supervisor", "3d_react_specialist"]
+        result["generation_trigger"] = "generate_3d_model"
+        result["delegation_transport"] = "mcp_in_memory"
+        return result
+
+    @app.post("/api/graphics/chat", status_code=202)
+    async def chat(body: ChatRequest, request: Request):
+        key = request.headers.get("idempotency-key", str(uuid.uuid4()))
+        return app.state.chat.submit(body.message, body.conversationId, key)
+
+    @app.get("/api/graphics/chats/{cid}")
+    async def conversation(cid: str):
+        result = app.state.chat.store.conversation(cid)
+        result["latestJob"] = app.state.chat.latest_job(cid)
+        return result
+
+    @app.get("/api/graphics/chat/turns/{tid}")
+    async def turn(tid: str):
+        return app.state.chat.store.get(tid)
+
+    @app.get("/api/graphics/chat/requests/{key}")
+    async def chat_request(key: str):
+        return app.state.chat.store.by_request(key)
 
     def memory_operation(operation):
         try:
@@ -149,6 +193,8 @@ def create_app(settings=None, tools=None, model=None):
     @app.post("/api/graphics/jobs", status_code=202)
     async def create(body: CreateRequest, request: Request):
         key = request.headers.get("idempotency-key", str(uuid.uuid4()))
+        if body.mode == "THREE_D":
+            return await app.state.generation.generate(body.prompt, key, body.parentJobId)
         return app.state.workflow.submit(body.prompt, body.mode, body.parentJobId, key)
 
     @app.get("/api/graphics/jobs")
