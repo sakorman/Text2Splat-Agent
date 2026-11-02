@@ -203,3 +203,38 @@ web-scan 尚未提供原生请求幂等键，不能将“唯一采集与参数�
 ### 待验证边界
 
 本机尚未配置 `ZHIPU_API_KEY`，没有调用真实外部模型或 GPU 训练。上述通过表示重构和流程契约正确，不代表生成图已具备多视角几何一致性或真实 3D 成品质感。下一步仍需配置密钥后对花瓶、香插、摆件做真实生成与 COLMAP/Brush 验收；默认免费模型与付费开关保持原配置。
+
+## 2026-11-02：按用户要求启用 ReAct 主循环
+
+### 实现
+
+用户明确选择 ReAct。开始时工作区干净，工作分支 `codex/local-graphics-agent` 与用户 main 均为 `e3a8f51`，两条 CI 成功。
+
+将固定阶段图改为 `preflight → model ⇄ tools → finish`。GLM-4.7-Flash 通过 LangChain 原生 function calling 选择工具，工具执行结果以 ToolMessage 回到模型。模型可以检查任务、补充渲染建议、推进生成或停止；没有生产用的脚本决策兜底。工具封装现有 MCP 提交与等待，ID 和供应商等参数绑定到当前任务；异步轮询不调用模型。
+
+- 8 个模型工具：参考图、候选视图、导入、重建、验证、检查任务、完成、停止。阶段依赖由代码校验，每轮只执行一个工具，多工具批次整批拒绝。
+- 每任务最多 12 轮决策，每轮输出最多 1024 tokens、等待最多 45 秒；模型请求关闭 SDK 重试，等待时可取消并检查任务总超时。正常 3D 路径约 6 次决策请求，设计规划与视觉审核另计。
+- 保留提交意图与幂等，新增有效动作记录；生成、导入、重建和验证最多各执行一次。参数或阶段错误作为观察返回，允许模型纠正；实际下游失败先清理任务，再供模型检查或停止，不能自动重发生图、绕过审核或续训。
+- 完成工具与模型的结束文本均接受真实产物门槛检查，模型不能单凭文字将任务置为 READY。审核失败保留 NEEDS_REVIEW，清理未知保留 CANCELLING。
+- 检查点记录工具调用和观察，不保存供应商思维链、解释或原始元数据；任务间不共享消息历史。API 增加 agentLoop、agentRounds、agentActions，健康接口报告 react、模型配置状态与决策上限。
+- 同一 ZHIPU_API_KEY 现在同时供后端 Agent 决策模型与 Creative MCP 使用，更新环境模板、README 与技术方案。没有修改首页或增加配置面板，没有启用收费 API、下载权重或改动 web-scan 仓库。
+
+### 来源与取舍
+
+查阅日期：2026-11-02；官方文档未给出页面发布日期，不将内容称为当天新增能力。
+
+- [ReAct 原论文](https://arxiv.org/abs/2210.03629)（2022-10-06 提交，2023-03-10 修订）：采用行动与观察交替的循环；本项目用原生工具调用承载行动，不解析文本 Thought/Action，也不要求展示思维链。
+- [LangGraph Workflows and agents](https://docs.langchain.com/oss/python/langgraph/workflows-agents)、[LangChain Agents](https://docs.langchain.com/oss/python/langchain/agents)：区分固定代码路径与模型动态选择工具。本轮使用明确的模型/工具节点，保留已有状态、MCP 错误与副作用约束，未增加多 Agent 或额外框架。
+- [GLM-4.7-Flash](https://docs.bigmodel.cn/cn/guide/models/free/glm-4.7-flash)文档列出 Function Calling；[智谱对话补全](https://docs.bigmodel.cn/api-reference/模型-api/对话补全)公开 tool_choice=auto。请求只发送已核对字段，不添加供应商文档未列出的 parallel_tool_calls、strict 或工具调用时的 JSON 模式。
+
+### 验证
+
+- 116 项 Python、8 项 Node 测试通过，共 124 项；pip 依赖检查与 Git 差异检查通过。保留上一轮工作流、MCP、API、重复请求、重启和取消的回归覆盖。
+- 新增 22 个 ReAct 场景，覆盖模型自主检查/停止、补充建议、真实观察反馈、违规动作纠正、伪造成功文本、重复提交、多工具批次、质量门槛绕过、12 轮上限、决策等待中的取消/超时、跨任务参数、概念模式边界和上下文隔离。
+- 用真实 LangChain ChatModel + HTTP MockTransport 驱动完整 LangGraph 循环，核对 6 轮原生 tool_calls/ToolMessage 往返及智谱请求字段；429/503/超时均只请求一次，畸形或截断调用不执行工具，检查点没有密钥或供应商推理内容。
+- Playwright 在独立临时数据服务中运行真实 ReAct 图和 SSE，模型/工具均为明确的测试替身。页面完成生成后报告 agentLoop=react、agentRounds=6；刷新只提交一次，取消可回到编辑状态，无页面脚本错误。生产首页仍只有一个描述框和一个生成按钮，旧任务链接继续可读；证据在忽略提交的 `.graphics/react-qa/`。
+- 确认原有 4 个任务均为终态、MCP 无活动任务后，重启本项目拥有的 Agent/MCP 进程。本机 8088 健康接口报告 react、max_decisions=12，两个 MCP 可连接，Brush 可用；既有 web-scan 服务未重启。
+
+### 边界与后续
+
+此实现已经是由模型选择工具的 ReAct，但生产工具仍有真实依赖次序；不支持任意重排或自动补图重试。尚未配置智谱密钥，未实际调用外部决策模型、生图模型或 GPU 训练，因此不能把测试通过描述为真实 GLM 决策可靠性、多视角一致性或最终 3D 质量已验收。后续需配置密钥后做真实样例，并观察决策轮数、停止原因和重建质量。

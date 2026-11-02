@@ -10,11 +10,11 @@
 
 - 极简生成页 `/graphics/`：一个描述输入框、一个「生成 3D 模型」按钮。自动执行完整流程，生成时显示进度并允许取消，成功后显示模型预览和下载；失败可修改描述重试，刷新当前任务地址可恢复进度。
 - 两个内置 MCP 服务，使用官方 MCP SDK 的 Streamable HTTP 协议。
-- 默认免费模型：`glm-4.7-flash` 整理设计、`cogview-3-flash` 生图、`glm-4.6v-flash` 检查外观。
+- 默认免费模型：`glm-4.7-flash` 做 ReAct 决策与整理设计、`cogview-3-flash` 生图、`glm-4.6v-flash` 检查外观。
 - 可选 Seedream 4.0 参考图约束生成，必须通过本地配置显式开启付费，不自动降级到付费服务。
 - 接入已有 [web-scan](https://github.com/sakorman/web-scan)：导入图片、冻结采集、SfM、Brush 本地 GPU 训练、预览与下载。
 - 异步任务、本地持久化、请求幂等、取消传播、重启中断恢复、丢失提交响应后的任务查询；进度连接短暂中断时有限重试只读查询。
-- Python LangGraph 状态图负责流程，SQLite 保存节点检查点；LangChain 接入规划、视觉模型与 MCP 工具。FastAPI 提供原有 API/SSE 和页面。
+- Python LangGraph 执行 ReAct 模型—工具循环，SQLite 保存消息和节点检查点；LangChain 接入规划、视觉模型与 MCP 工具。FastAPI 提供原有 API/SSE 和页面。
 - 3D Agent 不依赖 Java、Maven、MySQL、Redis、Ollama；原 Spring AI 聊天模块保留为历史独立应用。
 
 ## 快速启动
@@ -29,7 +29,7 @@ python3.12 -m venv .venv
 cp .env.example .env
 ```
 
-编辑本地 `.env`，填写自己在 [智谱开放平台](https://bigmodel.cn/) 创建的 `ZHIPU_API_KEY`。密钥只由后端 MCP 使用，页面不接收密钥，`.env` 已被 Git 忽略。
+编辑本地 `.env`，填写自己在 [智谱开放平台](https://bigmodel.cn/) 创建的 `ZHIPU_API_KEY`。密钥由后端 Agent 决策模型与 Creative MCP 使用，页面不接收密钥，`.env` 已被 Git 忽略。
 
 ```dotenv
 ZHIPU_API_KEY=填写自己的密钥
@@ -72,7 +72,13 @@ WEBSCAN_URL=http://127.0.0.1:8787
 
 当前版本固定使用 LangGraph **1.2.19**、LangChain **1.4.7**、langchain-openai **1.7.3** 和 SQLite checkpointer **3.1.3**。`langchain-openai` 在这里是智谱兼容接口适配器，不会改用 OpenAI 模型或启用新的收费服务。生图仍使用供应商专用 HTTP 接口。
 
-LangGraph 实际执行 `preflight → reference → multiview → import_views → start_reconstruction → wait_reconstruction → validate_result`；概念 API 分支在参考图完成后结束。模型调用发生在 Creative MCP 内，LangChain `StructuredTool` 通过官方 MCP Python SDK 连接两个内置服务。规划和审核保持固定职责，轮询与重建步骤由状态图控制，不额外让模型决定是否重复生图。
+主循环采用 **ReAct**：`preflight → model ⇄ tools → finish`。`glm-4.7-flash` 通过 LangChain 原生 function calling 选择行动，工具结果作为 ToolMessage 返回模型，再由模型决定继续、检查任务或停止。模型可为原始描述补充渲染建议；任务 ID、供应商、训练参数和结果地址由程序绑定。
+
+模型可调用 `generate_reference`、`generate_multiview`、`import_views`、`reconstruct`、`validate_result`、`inspect_task`、`finish`、`stop`。生成工具封装已有 MCP 提交与等待；LangChain StructuredTool 仍通过官方 MCP SDK 执行底层调用。真实依赖仍由代码检查：只有参考图完成才能生成候选视图，审核通过才能导入，真实重建与产物验证通过才能完成。
+
+每个任务最多 **12 轮决策**，单次决策最多等待 45 秒、最多输出 1024 tokens，不自动重试模型请求。正常 3D 路径需要约 6 次决策调用，另有原来的设计规划和视觉审核；轮询不会消耗额外模型 token。每轮只执行一个工具，多工具批次整批拒绝；生成、导入、重建和验证各最多执行一次。实际工具失败后先清理下游，再让模型观察失败并检查或停止，不自动重新生图或续训。工具参数错误可在剩余决策预算内纠正。
+
+`finish` 和模型的最终文本都不能绕过证据检查：尚未验证产物就结束会得到失败状态，不能显示 3D 成功。页面不展示思维链；检查点保存工具调用和观察，API 提供 `agentLoop`、`agentRounds`、`agentActions`，健康接口报告 `agent_loop=react`。
 
 升级前停止旧 Java Agent 与旧 MCP，保留 `.graphics/`，安装上述依赖后重新启动。原任务地址、请求标识、图片和结果继续可读；未完成任务按旧规则查询并清理下游，不自动重发生图或续训。SQLite 检查点记录节点状态，但不提供未经副作用核对的自动断点重放；当前未开放手动 replay API。
 
@@ -133,7 +139,7 @@ curl http://127.0.0.1:8080/api/graphics/jobs \
 工具表、调用约束、部署结构和验收清单见 [技术方案](docs/graphics-agent.md)。实现都在本仓库，**没有修改 web-scan 仓库**，它通过现有 HTTP API 被复用。
 
 ```text
-agent/text2splat/             LangGraph 工作流、LangChain 工具、FastAPI
+agent/text2splat/             ReAct 模型/工具循环、LangChain 工具、FastAPI
 agent/text2splat/static/graphics/  无构建依赖的工作台
 agent/tests/                  工作流、检查点、API 与真实 MCP SDK 测试
 mcp/graphics_mcp/             Creative / Web-scan MCP
@@ -142,7 +148,7 @@ scripts/                     本地启动与进程管理
   workflows/                 原子写入的任务记录（兼容旧 Java JSON）
   assets/                    生成图片及清单
   mcp.sqlite3                生图任务、幂等与 web-scan 映射
-  langgraph.sqlite3          LangGraph 节点检查点（thread_id = 任务 ID）
+  langgraph.sqlite3          LangGraph 消息/节点检查点（thread_id = 任务 ID）
 ```
 
 web-scan 自己的数据库、训练缓存和 Gaussian 模型仍保存在它的数据目录。通过 `GRAPHICS_DATA_DIR` 修改 Agent 数据目录时，需要让 Agent 与两个 MCP 使用相同路径。不要同时启动多个 Agent 或同种 MCP 操作同一数据目录。

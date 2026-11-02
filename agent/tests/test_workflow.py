@@ -3,6 +3,7 @@ from collections import Counter
 import json
 import time
 
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 import pytest
 import pytest_asyncio
@@ -16,11 +17,35 @@ pytestmark = pytest.mark.asyncio
 REF, VIEWS, SESSION, TRAIN = (letter * 32 for letter in "abcd")
 
 
+def action(name, args=None, identifier="call-test"):
+    return AIMessage(content="", tool_calls=[{"id": identifier, "name": name, "args": args or {}}])
+
+
+class FakeModel:
+    """Explicit model fixture; production never falls back to this decision policy."""
+    def __init__(self, replies=()):
+        self.replies = list(replies)
+        self.history = []
+
+    async def ainvoke(self, messages):
+        self.history.append(list(messages))
+        if self.replies:
+            return self.replies.pop(0)
+        if isinstance(messages[-1], ToolMessage):
+            observation = json.loads(messages[-1].content)["observation"]
+            names = observation["allowed_actions"]
+            name = next((n for n in names if n not in {"inspect_task", "stop"}), "stop")
+        else:
+            name = "generate_reference"
+        return action(name, identifier=f"call-{len(self.history)}")
+
+
 class FakeTools:
     """Contract fixtures only; these outputs are not generated artwork."""
     def __init__(self):
         self.calls = Counter()
         self.requests = {}
+        self.arguments = []
         self.fail_tool = None
         self.failures = 0
         self.permanent = False
@@ -33,6 +58,7 @@ class FakeTools:
 
     async def call(self, name, args):
         self.calls[name] += 1
+        self.arguments.append((name, args))
         if name == self.fail_tool and self.failures:
             self.failures -= 1
             self.entered.set()
@@ -75,7 +101,7 @@ async def rig(tmp_path):
     store = JobStore(tmp_path)
     tools = FakeTools()
     async with AsyncSqliteSaver.from_conn_string(str(tmp_path / "checkpoints.db")) as saver:
-        workflow = Workflow(AgentSettings(data_dir=tmp_path, poll_interval=.01), store, tools, saver)
+        workflow = Workflow(AgentSettings(data_dir=tmp_path, poll_interval=.01), store, tools, saver, model=FakeModel())
         await workflow.start()
         yield workflow, store, tools, saver
         await workflow.close()

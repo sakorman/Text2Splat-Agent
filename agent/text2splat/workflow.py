@@ -1,10 +1,15 @@
-"""A persisted LangGraph owns the text → images → local reconstruction workflow."""
+"""A bounded ReAct model/tool loop, with deterministic guards around MCP actions."""
 import asyncio
+import json
 import time
-from typing import TypedDict
+from typing import Annotated, TypedDict
 
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
+from pydantic import ValidationError
 
+from .react import ACTIONS, ReActModel
 from .store import TERMINAL, valid_id
 from .tools import TemporaryToolFailure, ToolFailure
 
@@ -18,6 +23,12 @@ class State(TypedDict, total=False):
     views_id: str
     session_id: str
     reconstruction_id: str
+    reconstruction_done: bool
+    verified_result: dict
+    messages: Annotated[list[AnyMessage], add_messages]
+    rounds: int
+    failure: dict
+    finished: bool
 
 
 class Cancelled(Exception):
@@ -30,24 +41,22 @@ class ReviewRequired(ToolFailure):
 
 class Workflow:
     READS = {"creative_get_job", "webscan_get_status", "webscan_get_result"}
+    MAX_ROUNDS = 12
 
-    def __init__(self, settings, store, tools, checkpointer):
+    def __init__(self, settings, store, tools, checkpointer, model=None):
         self.settings, self.store, self.tools = settings, store, tools
+        self.model = model if model is not None else ReActModel(settings)
         builder = StateGraph(State)
-        nodes = {"preflight": self.preflight, "reference": self.reference, "multiview": self.multiview,
-                 "import_views": self.import_views, "start_reconstruction": self.start_reconstruction,
-                 "wait_reconstruction": self.wait_reconstruction, "validate_result": self.validate_result}
+        nodes = {"preflight": self.preflight, "model": self.decide, "tools": self.act, "finish": self.finish}
         for name, fn in nodes.items():
             builder.add_node(name, fn)  # No graph-level RetryPolicy for side-effecting nodes.
         builder.add_edge(START, "preflight")
-        builder.add_edge("preflight", "reference")
-        builder.add_conditional_edges("reference", lambda state: "concept" if state["mode"] == "CONCEPT" else "3d",
-                                      {"concept": END, "3d": "multiview"})
-        for left, right in [("multiview", "import_views"), ("import_views", "start_reconstruction"),
-                            ("start_reconstruction", "wait_reconstruction"),
-                            ("wait_reconstruction", "validate_result"), ("validate_result", END)]:
-            builder.add_edge(left, right)
-        self.graph = builder.compile(checkpointer=checkpointer, name="text2splat")
+        builder.add_edge("preflight", "model")
+        builder.add_conditional_edges("model", lambda s: "tools" if s["messages"][-1].tool_calls else "finish")
+        builder.add_conditional_edges("tools", lambda s: "end" if s.get("finished") else "model",
+                                      {"end": END, "model": "model"})
+        builder.add_edge("finish", END)
+        self.graph = builder.compile(checkpointer=checkpointer, name="text2splat-react")
         self.queue = asyncio.Queue()
         self.worker = None
         self.active = None
@@ -84,7 +93,9 @@ class Workflow:
         return job
 
     async def health(self):
-        result = {"engine": "langgraph", "tool_framework": "langchain"}
+        result = {"engine": "langgraph", "tool_framework": "langchain", "agent_loop": "react",
+                  "decision_model": "glm-4.7-flash", "decision_configured": bool(self.settings.zhipu_key),
+                  "max_decisions": self.MAX_ROUNDS}
         for name in ("creative", "webscan"):
             try:
                 result[name] = await self.tools.call(name + "_health", {})
@@ -116,19 +127,158 @@ class Workflow:
     async def run(self, jid):
         job = self.store.get(jid)
         state = State(job_id=jid, prompt=job["prompt"], mode=job["mode"],
-                      deadline=time.time() + self.settings.job_timeout)
+                      deadline=time.time() + self.settings.job_timeout, rounds=0,
+                      messages=[HumanMessage(json.dumps({"description": job["prompt"], "mode": job["mode"]}, ensure_ascii=False))])
         try:
-            await self.graph.ainvoke(state, {"configurable": {"thread_id": jid}}, durability="sync")
+            await self.graph.ainvoke(state, {"configurable": {"thread_id": jid},
+                                            "recursion_limit": 2 * self.MAX_ROUNDS + 5}, durability="sync")
         except Cancelled:
             await self.finish_cancel(jid)
         except Exception as exc:
             if self.store.get(jid).get("cancelRequested"):
                 await self.finish_cancel(jid)
             else:
-                clean = await self.cleanup(jid)
-                message = str(exc)[:800] if isinstance(exc, ToolFailure) else "本地任务未完成，请检查服务和磁盘空间"
-                self.store.update(jid, status=("NEEDS_REVIEW" if isinstance(exc, ReviewRequired) else "FAILED") if clean else "CANCELLING",
-                                  message=message if clean else message + "；尚未确认下游停止，恢复服务后再次取消。")
+                await self.fail(jid, str(exc)[:800] if isinstance(exc, ToolFailure) else
+                                "本地任务未完成，请检查服务和磁盘空间")
+
+    async def fail(self, jid, message):
+        job = self.store.get(jid)
+        failure = job.get("agentFailure")
+        clean = job.get("cleanupConfirmed", False) if failure else await self.cleanup(jid)
+        status = failure["status"] if failure else "FAILED"
+        message = failure["message"] if failure else message
+        self.store.update(jid, status=status if clean else "CANCELLING", message=message if clean else
+                          message + "；尚未确认下游停止，恢复服务后再次取消。")
+
+    def allowed_actions(self, state):
+        allowed = ["inspect_task", "stop"]
+        if state.get("failure"):
+            return allowed
+        if not state.get("reference_id"):
+            allowed.append("generate_reference")
+        elif state["mode"] == "CONCEPT":
+            allowed.append("finish")
+        elif not state.get("views_id"):
+            allowed.append("generate_multiview")
+        elif not state.get("session_id"):
+            allowed.append("import_views")
+        elif not state.get("reconstruction_done"):
+            allowed.append("reconstruct")
+        elif not state.get("verified_result"):
+            allowed.append("validate_result")
+        else:
+            allowed.append("finish")
+        return allowed
+
+    async def decide(self, state):
+        self.check(state)
+        rounds = state["rounds"] + 1
+        if rounds > self.MAX_ROUNDS:
+            raise ToolFailure("Agent 已达到 12 轮决策上限，未继续调用模型或工具")
+        self.store.update(state["job_id"], agentLoop="react", agentRounds=rounds,
+                          message="正在根据当前结果决定下一步")
+        task = asyncio.create_task(self.model.ainvoke(state["messages"]))
+        until = time.monotonic() + self.settings.model_timeout
+        try:
+            while not task.done():
+                self.check(state)
+                if time.monotonic() >= until:
+                    raise ToolFailure("Agent 决策超时，未自动重试")
+                await asyncio.wait({task}, timeout=.1)
+            reply = task.result()
+            self.check(state)
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        if not isinstance(reply, AIMessage) or reply.invalid_tool_calls:
+            raise ToolFailure("Agent 返回无效工具调用，未执行工具")
+        ids = [c.get("id") for c in reply.tool_calls]
+        if any(not isinstance(i, str) or not i or len(i) > 160 for i in ids) or len(set(ids)) != len(ids):
+            raise ToolFailure("Agent 工具调用标识无效，未执行工具")
+        return {"rounds": rounds, "messages": [AIMessage(content="", tool_calls=reply.tool_calls)]}
+
+    def observation(self, state):
+        job = self.store.get(state["job_id"])
+        return {"mode": state["mode"], "allowed_actions": self.allowed_actions(state),
+                "remaining_decisions": self.MAX_ROUNDS - state["rounds"],
+                "reference_ready": bool(state.get("reference_id")), "views_reviewed": bool(state.get("views_id")),
+                "imported": bool(state.get("session_id")), "reconstruction_succeeded": bool(state.get("reconstruction_done")),
+                "artifact_verified": bool(state.get("verified_result")),
+                "spec": job.get("spec"), "review": job.get("review"), "failure": state.get("failure")}
+
+    async def act(self, state):
+        self.check(state)
+        calls = state["messages"][-1].tool_calls
+        if len(calls) != 1:
+            return {"messages": [ToolMessage(tool_call_id=c["id"], content=json.dumps({
+                "ok": False, "error": "每轮只允许一个工具；本轮没有执行任何工具"}, ensure_ascii=False)) for c in calls]}
+        call = calls[0]
+        name = call["name"]
+        update = {}
+        error = None
+        if name not in self.allowed_actions(state):
+            error = "工具未知、前置条件未满足或已执行；未调用下游"
+        else:
+            try:
+                args = ACTIONS[name][1].model_validate(call["args"])
+            except ValidationError:
+                error = "工具参数无效；不能指定其他任务 ID、路径、供应商或费用"
+            else:
+                if name == "generate_reference" and args.design_hint:
+                    enriched = state["prompt"] + "\n补充渲染建议（以原描述为准）：" + args.design_hint
+                    if len(enriched) > 2000:
+                        error = "描述和补充建议合计超过 2000 字；请缩短或省略 design_hint"
+        if not error:
+            # Only valid actions enter the side-effect boundary. Even if a graph
+            # node is manually reentered, the job journal forbids a second attempt.
+            try:
+                if name not in {"inspect_task", "stop", "finish"}:
+                    job = self.store.get(state["job_id"])
+                    attempts = job.get("agentActions", [])
+                    if name in attempts:
+                        raise ToolFailure("该操作已提交过，未重复执行")
+                    self.store.update(state["job_id"], agentActions=[*attempts, name])
+                if name == "generate_reference":
+                    update = await self.reference(state, args.design_hint)
+                elif name == "generate_multiview":
+                    update = await self.multiview(state)
+                elif name == "import_views":
+                    update = await self.import_views(state)
+                elif name == "reconstruct":
+                    update = await self.start_reconstruction(state)
+                    await self.wait_reconstruction({**state, **update})
+                    update["reconstruction_done"] = True
+                elif name == "validate_result":
+                    update = await self.validate_result(state)
+                elif name == "finish":
+                    update = await self.finish(state)
+                elif name == "stop":
+                    await self.fail(state["job_id"], "Agent 决定停止，尚未生成经过验证的结果")
+                    update = {"finished": True}
+            except ToolFailure as exc:
+                failure = {"status": "NEEDS_REVIEW" if isinstance(exc, ReviewRequired) else "FAILED", "message": str(exc)[:800]}
+                clean = await self.cleanup(state["job_id"])
+                self.store.update(state["job_id"], agentFailure=failure, cleanupConfirmed=clean)
+                update = {"failure": failure}
+                error = failure["message"]
+        self.check(state)
+        data = {"ok": error is None, "observation": self.observation({**state, **update})}
+        if error:
+            data["error"] = error
+        return {**update, "messages": [ToolMessage(tool_call_id=call["id"], name=name,
+                                                   content=json.dumps(data, ensure_ascii=False))]}
+
+    async def finish(self, state):
+        self.check(state)
+        if not state.get("failure") and state["mode"] == "CONCEPT" and state.get("reference_id"):
+            self.store.update(state["job_id"], status="CONCEPT_READY", stage="complete", message="概念图已完成")
+        elif not state.get("failure") and state.get("reconstruction_done") and state.get("verified_result"):
+            self.store.update(state["job_id"], result=state["verified_result"], status="READY", stage="complete",
+                              message="3D 展品已生成，可旋转查看并下载")
+        else:
+            await self.fail(state["job_id"], "Agent 提前结束，尚未完成产物验证")
+        return {"finished": True}
 
     def check(self, state):
         if self.store.get(state["job_id"]).get("cancelRequested"):
@@ -194,16 +344,15 @@ class Workflow:
         self.store.update(state["job_id"], provider=provider)
         return {}
 
-    async def reference(self, state):
+    async def reference(self, state, design_hint=""):
         self.stage(state, "PLANNING", "planning", "正在整理物件设计")
         child = await self.submit_once(state, "referenceRequest", "creative_generate_reference",
-                                       {"prompt": state["prompt"]}, "creative_get_request", "id")
+                                       {"prompt": state["prompt"] + ("\n补充渲染建议（以原描述为准）：" + design_hint if design_hint else "")},
+                                       "creative_get_request", "id")
         self.store.update(state["job_id"], creativeJobId=child)
         result = await self.wait_creative(state, child, False)
         ref = valid_id(result.get("asset_set_id"))
         self.store.update(state["job_id"], referenceSetId=ref, spec=result.get("spec", {}))
-        if state["mode"] == "CONCEPT":
-            self.stage(state, "CONCEPT_READY", "complete", "概念图已完成")
         return {"reference_id": ref}
 
     async def wait_creative(self, state, child, views):
@@ -273,11 +422,11 @@ class Workflow:
     async def validate_result(self, state):
         self.stage(state, "VALIDATING", "export", "正在检查 3D 产物")
         result = await self.read(state, "webscan_get_result", {"job_id": state["reconstruction_id"]})
-        if not any(isinstance(f, dict) and f.get("name") == "gaussians.ply" and f.get("url") for f in result.get("files", [])):
+        if not any(isinstance(f, dict) and f.get("name") == "gaussians.ply" and f.get("url")
+                   and isinstance(f.get("bytes"), (int, float)) and f["bytes"] > 0 for f in result.get("files", [])):
             raise ToolFailure("缺少有效的 Gaussian PLY 产物")
         self.check(state)
-        self.store.update(state["job_id"], result=result, status="READY", stage="complete", message="3D 展品已生成，可旋转查看并下载")
-        return {}
+        return {"verified_result": result}
 
     async def cleanup(self, jid):
         complete = True

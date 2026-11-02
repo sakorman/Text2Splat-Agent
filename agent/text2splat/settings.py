@@ -13,3 +13,5 @@ class AgentSettings:
     poll_interval: float = 2.0
     job_timeout: float = 7200.0
     mcp_timeout: float = 90.0
+    zhipu_key: str = field(default_factory=lambda: os.getenv("ZHIPU_API_KEY", ""), repr=False)
+    model_timeout: float = 45.0
