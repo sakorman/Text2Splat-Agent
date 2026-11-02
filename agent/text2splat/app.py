@@ -1,0 +1,179 @@
+"""Loopback-only FastAPI host for the LangGraph agent and the existing studio."""
+import asyncio
+from contextlib import asynccontextmanager
+import json
+import os
+from pathlib import Path
+import re
+from urllib.parse import urlsplit
+import uuid
+
+from dotenv import load_dotenv
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from pydantic import BaseModel, Field, field_validator
+
+from .settings import AgentSettings
+from .store import JobStore, TERMINAL, valid_id
+from .tools import McpTools
+from .workflow import Workflow
+
+STATIC = Path(__file__).parent / "static" / "graphics"
+CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+       "frame-src http://127.0.0.1:* http://localhost:*; object-src 'none'; base-uri 'self'; frame-ancestors 'self'")
+
+
+class LocalOnly:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        request = Request(scope)
+        host = request.headers.get("host", "")
+        allowed = bool(re.fullmatch(r"(localhost|127\.0\.0\.1|\[::1\])(?::[0-9]{1,5})?", host))
+        origin = request.headers.get("origin")
+        try:
+            target = urlsplit(scope["scheme"] + "://" + host)
+            if target.port is not None and not 1 <= target.port <= 65535:
+                allowed = False
+            if origin:
+                parsed = urlsplit(origin)
+                allowed = allowed and not parsed.username and not parsed.password and not parsed.query and not parsed.fragment
+                allowed = allowed and parsed.path in ("", "/") and (
+                    parsed.scheme, parsed.hostname, parsed.port or 80) == (target.scheme, target.hostname, target.port or 80)
+        except ValueError:
+            allowed = False
+        if not allowed:
+            return await JSONResponse({"message": "仅允许本机同源访问"}, status_code=403)(scope, receive, send)
+
+        async def with_headers(message):
+            if message["type"] == "http.response.start":
+                message["headers"] += [(b"x-content-type-options", b"nosniff"), (b"referrer-policy", b"no-referrer"),
+                                       (b"content-security-policy", CSP.encode()),
+                                       (b"cache-control", b"no-store" if scope["path"].startswith("/api/") else b"no-cache")]
+            await send(message)
+        await self.app(scope, receive, with_headers)
+
+
+class CreateRequest(BaseModel):
+    prompt: str = Field(min_length=2, max_length=2000)
+    mode: str = Field(default="CONCEPT", pattern=r"^(CONCEPT|THREE_D)$")
+    parentJobId: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
+
+    @field_validator("prompt", mode="before")
+    @classmethod
+    def strip_prompt(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+
+def create_app(settings=None, tools=None):
+    settings = settings or AgentSettings()
+
+    @asynccontextmanager
+    async def lifespan(app):
+        store = JobStore(settings.data_dir)
+        try:
+            async with AsyncSqliteSaver.from_conn_string(str(settings.data_dir / "langgraph.sqlite3")) as saver:
+                await saver.setup()
+                workflow = Workflow(settings, store, tools or McpTools(settings), saver)
+                app.state.store, app.state.workflow = store, workflow
+                await workflow.start()
+                try:
+                    yield
+                finally:
+                    await workflow.close()
+        finally:
+            store.close()
+
+    app = FastAPI(title="Text2Splat Agent", version="0.2.0", lifespan=lifespan, docs_url=None, redoc_url=None)
+    app.add_middleware(LocalOnly)
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(request, exc):
+        return JSONResponse({"message": "请提供 2–2000 字描述和有效的生成模式"}, status_code=400)
+
+    @app.exception_handler(ValueError)
+    async def invalid(request, exc):
+        return JSONResponse({"message": str(exc)}, status_code=400)
+
+    @app.exception_handler(KeyError)
+    async def missing(request, exc):
+        return JSONResponse({"message": str(exc.args[0])}, status_code=404)
+
+    @app.exception_handler(RuntimeError)
+    async def unavailable(request, exc):
+        return JSONResponse({"message": "本地任务服务暂不可用，请检查服务和磁盘空间"}, status_code=503)
+
+    @app.get("/")
+    async def home():
+        return RedirectResponse("/graphics/")
+
+    @app.get("/api/graphics/health")
+    async def health():
+        return await app.state.workflow.health()
+
+    @app.post("/api/graphics/jobs", status_code=202)
+    async def create(body: CreateRequest, request: Request):
+        key = request.headers.get("idempotency-key", str(uuid.uuid4()))
+        return app.state.workflow.submit(body.prompt, body.mode, body.parentJobId, key)
+
+    @app.get("/api/graphics/jobs")
+    async def jobs():
+        return app.state.store.list()[:50]
+
+    @app.get("/api/graphics/jobs/{jid}")
+    async def job(jid: str):
+        return app.state.store.get(jid)
+
+    @app.get("/api/graphics/requests/{key}")
+    async def by_request(key: str):
+        return app.state.store.by_request(key)
+
+    @app.post("/api/graphics/jobs/{jid}/cancel")
+    async def cancel(jid: str):
+        return app.state.workflow.cancel(jid)
+
+    @app.get("/api/graphics/jobs/{jid}/events")
+    async def events(jid: str, request: Request):
+        app.state.store.get(jid)
+
+        async def stream():
+            while not await request.is_disconnected():
+                value = app.state.store.get(jid)
+                yield f"event:progress\nid:{value['updatedAt']}\ndata:{json.dumps(value, ensure_ascii=False)}\n\n"
+                if value["status"] in TERMINAL:
+                    break
+                await asyncio.sleep(1)
+        return StreamingResponse(stream(), media_type="text/event-stream")
+
+    @app.get("/api/graphics/assets/{set_id}/{name}")
+    async def asset(set_id: str, name: str):
+        try:
+            valid_id(set_id)
+        except ValueError:
+            raise KeyError("图片不存在") from None
+        directory = settings.data_dir / "assets" / set_id
+        path = directory / name
+        if (not re.fullmatch(r"[0-9]{2}\.png", name) or directory.is_symlink()
+                or path.is_symlink() or not path.is_file()):
+            raise KeyError("图片不存在")
+        return FileResponse(path, media_type="image/png")
+
+    app.mount("/graphics", StaticFiles(directory=STATIC, html=True), name="graphics")
+    return app
+
+
+def main():
+    load_dotenv()
+    import uvicorn
+    uvicorn.run(create_app(), host="127.0.0.1", port=int(os.getenv("PORT", "8080")),
+                proxy_headers=False, timeout_graceful_shutdown=15)
+
+
+if __name__ == "__main__":
+    main()

@@ -6,6 +6,9 @@ import socket
 from urllib.parse import urlsplit
 
 import httpx
+from langchain.chat_models import init_chat_model
+from langchain_core.messages import convert_to_messages
+from openai import APIConnectionError, APIStatusError
 
 from .settings import Settings
 from .store import MAX_IMAGE_BYTES
@@ -37,20 +40,28 @@ class Providers:
             raise ProviderError("模型请求超时或返回格式异常；结果未知，未自动重试") from None
 
     def chat_json(self, model, messages, *, json_mode=False):
-        payload = {
-            "model": model, "messages": messages, "stream": False,
-            "max_tokens": 4096, "thinking": {"type": "disabled"},
-        }
-        # Zhipu documents response_format for text models only. Vision relies on
-        # the JSON prompt and the same strict response validation, without retries.
-        if json_mode:
-            payload["response_format"] = {"type": "json_object"}
-        data = self.post(ZHIPU, "/chat/completions", self.settings.zhipu_key, payload)
+        # LangChain handles messages/model invocation; image generation remains a
+        # provider-specific endpoint. Disable SDK retries and Responses routing.
+        chat = init_chat_model(model, model_provider="openai", base_url=ZHIPU,
+                               api_key=self.settings.zhipu_key, http_client=self.client,
+                               max_retries=0, timeout=180, stream_usage=False,
+                               use_responses_api=False,
+                               extra_body={"max_tokens": 4096, "thinking": {"type": "disabled"}})
+        if json_mode:  # Zhipu supports response_format on text models only.
+            chat = chat.bind(response_format={"type": "json_object"})
         try:
-            choice = data["choices"][0]
-            if not isinstance(choice, dict) or choice.get("finish_reason") == "length":
+            reply = chat.invoke(convert_to_messages(messages))
+        except APIStatusError as exc:
+            messages = {401: "API Key 无效", 403: "模型权限或免费额度不足", 429: "模型调用达到限额，请稍后创建新版本"}
+            raise ProviderError(messages.get(exc.status_code, f"模型服务返回 HTTP {exc.status_code}；未自动重试")) from None
+        except APIConnectionError:
+            raise ProviderError("模型请求超时；结果未知，未自动重试") from None
+        except Exception:
+            raise ProviderError("模型未返回完整 JSON，请创建新版本重试") from None
+        try:
+            if reply.response_metadata.get("finish_reason") == "length":
                 raise ValueError()
-            content = choice["message"]["content"]
+            content = reply.content
             if not isinstance(content, str):
                 raise ValueError()
             content = content.strip()

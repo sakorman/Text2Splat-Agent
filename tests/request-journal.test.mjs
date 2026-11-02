@@ -4,7 +4,7 @@ import {
   readPendingRequest,
   preparePendingRequest,
   clearPendingRequest,
-} from "../src/main/resources/static/graphics/request-journal.mjs";
+} from "../agent/text2splat/static/graphics/request-journal.mjs";
 
 function storage() {
   const data = new Map();

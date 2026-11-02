@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { acceptsJobUpdate } from "../src/main/resources/static/graphics/job-updates.mjs";
+import { acceptsJobUpdate } from "../agent/text2splat/static/graphics/job-updates.mjs";
 
 const job = (id, status) => ({ id, status });
 

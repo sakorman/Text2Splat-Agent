@@ -17,9 +17,6 @@ spring:
       chat:
         options:
           model: ${OLLAMA_MODEL:deepseek-r1:7b}
-    mcp:
-      client:
-        enabled: false
     vectorstore:
       redis:
         initialize-schema: true

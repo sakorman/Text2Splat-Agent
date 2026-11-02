@@ -14,17 +14,25 @@
 
 | 组件 | 职责 | 数据 / 调用 |
 | --- | --- | --- |
-| Spring Boot Agent | 持久化任务、驱动阶段、取消、SSE、前端 | 本地 JSON 任务记录，MCP 客户端 |
+| LangGraph + FastAPI Agent | 状态图、持久化任务、取消、SSE、前端 | SQLite 检查点、兼容旧 JSON，LangChain MCP 工具 |
 | Creative MCP | GLM 设计规格、CogView / Seedream 图片、GLM 视觉检查 | SQLite 生图队列、本地图片 |
 | Web-scan MCP | 翻译为现有 web-scan API、幂等导入和训练提交 | 资产集合 ID → session ID → job ID |
 | web-scan | 图片验证、SfM、Brush、本地导出 | 原有数据库、队列和 artifacts |
 | web-scan viewer | 真实 Gaussian 渲染、旋转与下载 | `?p={sessionId}&j={jobId}` |
 
-模型负责设计内容与外观判断，Java 使用可预测的工作流调用内置 MCP。训练轮询由后台线程完成，不让大模型反复消耗 token 查询进度。MCP 只交换 ID、小型元数据和结果链接，不将 PLY 或大批图片塞进模型上下文。
+模型负责设计内容与外观判断，LangGraph 使用固定状态图调用内置 MCP，LangChain 接入文本规划与视觉审核模型。训练轮询由异步工作队列完成，不让大模型反复消耗 token 查询进度。MCP 只交换 ID、小型元数据和结果链接，不将 PLY 或大批图片塞进模型上下文。
+
+## LangGraph 执行与检查点
+
+`agent/text2splat/workflow.py` 构建并编译 StateGraph，依次执行预检、参考图、候选视图、导入、启动重建、轮询与产物检查。`thread_id` 使用原任务 ID，AsyncSqliteSaver 在节点边界同步持久化；原 JSON 记录继续服务页面，并在每次生图或训练提交前记录请求意图。
+
+不在有副作用的节点配置 RetryPolicy，也不在服务重启时对未完成检查点直接调用 `ainvoke(None)`。已有意图只允许查询原结果；查询为空仍不重发提交。重启保留此前的中断清理行为。检查点与下游执行不是同一个事务，不能把该实现称为 exactly-once 或保证自动续跑。
+
+LangChain 的模型适配器显式关闭 SDK 重试（`max_retries=0`），限定智谱 Chat Completions 端点；文本 JSON 模式与视觉提示词 JSON 解析继续分别处理。图片接口没有统一的 ChatModel 契约，因此沿用已有供应商图片适配器。MCP 工具采用固定白名单和参数 schema，解析既有 `ok/data/error` 信封；不启用 LangChain 原生 MCP beta 或迁移 MCP v2。
 
 ## MCP 工具契约
 
-两个服务都只监听 loopback，使用 `/mcp` Streamable HTTP、官方 Python SDK FastMCP 与 Java SDK。工具统一返回 `{"ok":true,"data":...}` 或 `{"ok":false,"error":"可展示错误"}`。
+两个服务都只监听 loopback，使用 `/mcp` Streamable HTTP、官方 Python SDK FastMCP 与 ClientSession；Agent 端包装成 LangChain StructuredTool。工具统一返回 `{"ok":true,"data":...}` 或 `{"ok":false,"error":"可展示错误"}`。
 
 | 工具 | 输入 | 返回 |
 | --- | --- | --- |
@@ -58,9 +66,9 @@
 ## 任务可靠性
 
 - 前端使用 `Idempotency-Key`；相同 key 和内容复用任务，内容冲突返回 400。提交前把原请求写入标签页 `sessionStorage` 并设置 `?request=` 地址；响应丢失后刷新只调用 `GET /api/graphics/requests/{key}` 找回任务，未找到时保留标识供手动重试，不自动生成。确认任务 ID 后清理提交记录。
-- Java 单工作线程，最多 16 个活动任务；Creative 单工作线程，最多 32 个活动任务。
+- Agent 单异步工作队列，最多 16 个活动任务；Creative 单工作线程，最多 32 个活动任务。
 - 生成提交前写入请求标识。响应丢失时按标识查询并清理遗留任务，不重新请求图片。
-- Java 任务文件原子替换；MCP SQLite WAL 记录幂等映射。每个服务使用进程文件锁避免重复启动。
+- Agent 任务文件原子替换并兼容旧 Java JSON；LangGraph 节点状态写入独立 SQLite 检查点；MCP SQLite WAL 记录幂等映射。每个服务使用进程文件锁避免重复启动。
 - 下游导入按资产集合复用采集；web-scan 本身进一步去重。训练启动前保存采集 ID 与完整预设；已有启动意图的同一请求只做查询，不重发训练 POST。响应丢失时必须唯一匹配采集与参数，确认后持久化任务 ID；零个或多个匹配均保留未知状态，不能取列表首项作为取消目标。启动响应自身也核对采集与参数，发现其他参数的活动任务时不发送新训练请求。旧意图按此前固定预设兼容查询。
 - 取消优先于晚到的成功结果。已发送的外部模型请求不能撤回，重建取消交给 web-scan 终止进程组。
 - 浏览器只接收属于当前任务、且与原请求任务 ID 相符的异步更新。终态保持不变，`CANCELLING` 不被旧的运行进度覆盖；取消请求的等待状态按任务 ID 记录。旧请求返回或失败不能污染新任务的界面，旧请求的结束处理也不能提前启用新任务仍在等待的取消按钮。
@@ -94,5 +102,5 @@
 - [智谱图像生成 API](https://docs.bigmodel.cn/api-reference/模型-api/图像生成)
 - [Seedream 图像生成](https://docs.volcengine.com/docs/ark/image-generation-tutorial?lang=zh)
 - [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk)
-- [MCP Java SDK](https://github.com/modelcontextprotocol/java-sdk)
-- [Spring AI 1.1.8](https://github.com/spring-projects/spring-ai/tree/v1.1.8)
+- [LangGraph 持久化与检查点](https://docs.langchain.com/oss/python/langgraph/persistence)
+- [LangChain MCP 文档](https://docs.langchain.com/oss/python/langchain/mcp)
