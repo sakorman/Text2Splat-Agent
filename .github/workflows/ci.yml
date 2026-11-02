@@ -7,21 +7,29 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: LangGraph, LangChain and MCP tests
+        run: |
+          python -m pip install -e 'mcp[dev]' -e 'agent[dev]'
+          python -m pip check
+          python -m pytest -q
+      - name: Browser script checks
+        run: |
+          node --check agent/text2splat/static/graphics/studio.js
+          node --test tests/*.test.mjs
+  legacy-chat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
           cache: maven
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Java tests
+      - name: Legacy chat build (not the 3D agent runtime)
         run: mvn --batch-mode verify
-      - name: MCP tests
-        run: |
-          python -m pip install -e 'mcp[dev]'
-          python -m pytest mcp/tests -q
-      - name: Browser script checks
-        run: |
-          node --check src/main/resources/static/graphics/studio.js
-          node --test tests/*.test.mjs

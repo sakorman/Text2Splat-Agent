@@ -202,6 +202,10 @@ def test_text_and_vision_use_supported_output_modes(setup):
     def respond(request):
         payload = json.loads(request.content)
         requests.append(payload)
+        assert request.url.path == "/api/paas/v4/chat/completions"
+        assert payload["max_tokens"] == 4096
+        assert "max_completion_tokens" not in payload
+        assert payload["thinking"] == {"type": "disabled"}
         if payload["model"] == "glm-4.7-flash":
             assert payload["response_format"] == {"type": "json_object"}
             result = {"title": "花瓶", "object_prompt": "青瓷花瓶"}
@@ -215,7 +219,7 @@ def test_text_and_vision_use_supported_output_modes(setup):
             assert all(item["image_url"]["url"].startswith("data:image/jpeg;base64,") for item in images)
             result = {"consistent": True, "reason": "外观一致"}
         return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {
-            "content": json.dumps(result, ensure_ascii=False)}}]})
+            "role": "assistant", "content": json.dumps(result, ensure_ascii=False)}}]})
 
     with httpx.Client(transport=httpx.MockTransport(respond)) as client:
         provider = Providers(settings, client)
@@ -241,6 +245,8 @@ def test_invalid_vision_review_never_publishes_reconstructable_images(setup, cho
 
     def respond(request):
         requests.append(request)
+        if isinstance(choice, dict) and isinstance(choice.get("message"), dict):
+            choice["message"]["role"] = "assistant"
         return httpx.Response(200, json={"choices": [choice]})
 
     with httpx.Client(transport=httpx.MockTransport(respond)) as client:
@@ -256,6 +262,24 @@ def test_invalid_vision_review_never_publishes_reconstructable_images(setup, cho
     assert not (store.directory(job["id"]) / "manifest.json").exists()
     with pytest.raises(ValueError, match="尚未完成"):
         Webscan(settings, store).import_views(job["id"])
+
+
+@pytest.mark.parametrize("failure", [429, 503, "timeout"])
+def test_langchain_model_calls_never_retry_or_expose_provider_errors(setup, failure):
+    settings, _, _, _ = setup
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        if failure == "timeout":
+            raise httpx.ReadTimeout("secret-provider-detail", request=request)
+        return httpx.Response(failure, json={"error": {"message": "secret-provider-detail"}})
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(ProviderError) as caught:
+            Providers(settings, client).plan("一个青瓷花瓶")
+    assert len(requests) == 1
+    assert "secret-provider-detail" not in str(caught.value)
 
 
 def test_webscan_http_contract_and_artifact_gate(setup):

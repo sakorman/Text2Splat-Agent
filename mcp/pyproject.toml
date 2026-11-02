@@ -7,7 +7,8 @@ name = "graphics-agent-mcp"
 version = "0.1.0"
 description = "Local creative and web-scan MCP adapters for Text2Splat Agent"
 requires-python = ">=3.11"
-dependencies = ["mcp>=1.28,<2", "httpx>=0.28,<1", "pillow>=11,<13", "python-dotenv>=1,<2"]
+dependencies = ["mcp>=1.30,<2", "httpx>=0.28,<1", "pillow>=11,<13", "python-dotenv>=1,<2",
+                "langchain==1.4.7", "langchain-openai==1.7.3"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10"]

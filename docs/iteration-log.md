@@ -170,3 +170,36 @@ web-scan 尚未提供原生请求幂等键，不能将“唯一采集与参数�
 ### 后续
 
 真实模型验收仍待本机配置智谱密钥后进行，尤其需要确认完整多图审核的服务限制与效果。JSON 能被解析不代表外观一致，更不能证明多视角几何正确；继续由审核结论、COLMAP 相机估计和真实 Brush 训练逐步决定后续状态。
+
+## 2026-11-02：按用户要求迁移到 LangGraph + LangChain
+
+### 实现与迁移
+
+开始时工作区干净，分支为 `codex/local-graphics-agent`，用户远程 main 与工作分支均为 `a8b9801`，上一轮 CI 成功。此次按用户明确要求重构主 Agent，不是定时任务主动扩充框架。
+
+- 新增 Python `agent/text2splat`：LangGraph StateGraph 实际执行预检、参考图、候选视图、导入、启动重建、轮询和产物验证；SQLite checkpointer 保存各节点状态，任务 ID 对应 thread_id。
+- LangChain 接入智谱文本规划与视觉审核；`StructuredTool` 包装固定白名单的 MCP 工具，底层复用官方 MCP Python SDK Streamable HTTP。图片生成仍调用供应商专用接口，现有 Creative/Web-scan MCP 保留。
+- FastAPI 接管原有任务、取消、按请求恢复、SSE、图片和页面接口；迁移静态文件，首页仍是一个描述框和一个生成按钮。原 Java 图形工作流、API、相关测试及 MCP starter 已移除；Java 聊天模块作为独立历史应用保留。
+- 启动脚本无需 Java/Maven；CI 分别检查 Python 3D Agent 与历史聊天构建。README 和技术方案补充依赖、迁移方式、状态图与检查点边界。
+- 保留原 JSON 任务格式、进程锁、提交前意图、终态不倒退、取消优先和只读查询有限重试。旧意图存在时只能查询，不重复生图或启动训练；服务重启仍中断并清理遗留任务，不直接重放未完成图节点。模型适配器显式 `max_retries=0`，不启用收费服务或下载模型权重。
+
+### 参考与取舍
+
+查阅日期：2026-11-02。当前官方文档未标注页面发布日期，不将其描述为当天新增能力。
+
+- [LangGraph 持久化文档](https://docs.langchain.com/oss/python/langgraph/persistence)：按 thread_id 隔离检查点，使用文件 SQLite 替代易失内存；本项目只保存小型状态，不将图片和 PLY 放进图上下文。检查点不能和下游副作用组成同一事务，因此不承诺 exactly-once 或自动续跑。
+- [LangChain MCP 文档](https://docs.langchain.com/oss/python/langchain/mcp)：原生 `langchain.mcp` 仍标为 beta，依赖独立 FastMCP；为兼容既有 MCP 1.x 服务和业务错误信封，采用明确的 StructuredTool + 官方 SDK 桥接，不顺带迁移传输栈。
+- 固定安装并核对 LangGraph 1.2.19、LangChain 1.4.7、langchain-openai 1.7.3、SQLite checkpointer 3.1.3；本机 MCP SDK 1.30.0。兼容适配器实际访问智谱端点，不代表改用 OpenAI 模型。
+
+### 验证证据
+
+- 94 项 Python、8 项 Node 测试通过，共 102 项。覆盖真实状态图执行、概念分支、SQLite 重开后的检查点、旧任务恢复、不重复提交、取消竞态、退避取消/超时、审核/重建失败和产物门槛。
+- API 验证包括异步 202、幂等冲突、终态 SSE、按请求只读恢复、静态资源、输入与同源检查；真实 MCP SDK 通过本地 HTTP 测试服务连接 LangChain 工具，并确认工具桥本身不重试写操作。
+- 模型 HTTP 契约确认文本 JSON 模式、视觉请求的 13 张缩略图、智谱端点与 max_tokens/thinking 字段；429、503 和超时各只发送一次请求，错误不泄露供应商返回内容。测试响应补齐标准 assistant role，避免不完整替身掩盖解析测试。
+- `pip check`、前端语法、启动脚本语法、Git 差异检查通过；`mvn clean verify` 通过，旧外部 RAG 集成测试按原设置跳过。
+- Playwright 使用独立临时数据目录的真实 FastAPI/LangGraph/SSE 与工具替身，验证点击生成、刷新恢复原 ID 且仅一次提交、结果展示、取消与再次编辑，以及短输入/未知任务错误。桌面 1280×900、手机 390×844 检查无裁切和横向溢出，无页面脚本错误。证据保存在忽略提交的 `.graphics/langgraph-qa/`。
+- 确认没有活动任务后替换本轮项目拥有的旧 Agent/MCP 进程，本机 8088 预览已运行 Python 服务。真实健康接口返回 `engine=langgraph`、`tool_framework=langchain`，两个 MCP 可连接，Brush 可用；原有 4 条失败任务记录和旧链接保留。已有 web-scan 进程未重启，仓库未改动。
+
+### 待验证边界
+
+本机尚未配置 `ZHIPU_API_KEY`，没有调用真实外部模型或 GPU 训练。上述通过表示重构和流程契约正确，不代表生成图已具备多视角几何一致性或真实 3D 成品质感。下一步仍需配置密钥后对花瓶、香插、摆件做真实生成与 COLMAP/Brush 验收；默认免费模型与付费开关保持原配置。

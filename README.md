@@ -1,6 +1,6 @@
 # Text2Splat Agent · 造物方舟
 
-**文字驱动的本地 3DGS Agent。** Text 表示文字描述，Splat 对应 3D Gaussian Splatting；通过内置 MCP 串联设计、生图与本机重建。
+**基于 LangGraph + LangChain 的本地 3DGS Agent。** Text 表示文字描述，Splat 对应 3D Gaussian Splatting；通过内置 MCP 串联设计、生图与本机重建。
 
 一句话设计一个文创物件：生成参考图、尝试生成 12 张候选视图，在自己的电脑上运行 COLMAP + Brush，得到可旋转查看的 3D Gaussian 展品。
 
@@ -14,17 +14,18 @@
 - 可选 Seedream 4.0 参考图约束生成，必须通过本地配置显式开启付费，不自动降级到付费服务。
 - 接入已有 [web-scan](https://github.com/sakorman/web-scan)：导入图片、冻结采集、SfM、Brush 本地 GPU 训练、预览与下载。
 - 异步任务、本地持久化、请求幂等、取消传播、重启中断恢复、丢失提交响应后的任务查询；进度连接短暂中断时有限重试只读查询。
-- 新的 `graphics` 启动模式不依赖 MySQL、Redis、Ollama；原聊天模块仍可使用默认模式运行。
+- Python LangGraph 状态图负责流程，SQLite 保存节点检查点；LangChain 接入规划、视觉模型与 MCP 工具。FastAPI 提供原有 API/SSE 和页面。
+- 3D Agent 不依赖 Java、Maven、MySQL、Redis、Ollama；原 Spring AI 聊天模块保留为历史独立应用。
 
 ## 快速启动
 
-需要 **JDK 17+、Maven、Python 3.11+**。macOS / Linux 支持启动脚本；本地 3D 还需要已安装的 web-scan 和 Brush。Apple Silicon 可使用 Brush 的 Metal 后端，不需要 NVIDIA 显卡或云端 GPU。
+需要 **Python 3.11+**。macOS / Linux 支持启动脚本；本地 3D 还需要已安装的 web-scan 和 Brush。Apple Silicon 可使用 Brush 的 Metal 后端，不需要 NVIDIA 显卡或云端 GPU。
 
 ```bash
 git clone https://github.com/sakorman/Text2Splat-Agent.git
 cd Text2Splat-Agent
 python3.12 -m venv .venv
-.venv/bin/python -m pip install -e 'mcp[dev]'
+.venv/bin/python -m pip install -e 'mcp[dev]' -e 'agent[dev]'
 cp .env.example .env
 ```
 
@@ -39,11 +40,10 @@ WEBSCAN_URL=http://127.0.0.1:8787
 ```
 
 ```bash
-# 按需设置 JAVA_HOME 指向 JDK 17 或更高版本
 ./scripts/start-graphics.sh
 ```
 
-打开 **http://127.0.0.1:8080/graphics/**。脚本先构建 Java，然后启动两个 MCP 和 Agent；检测到本机 web-scan 已运行时直接复用，否则尝试用 `WEBSCAN_REPO/.venv/bin/python` 启动它。Ctrl-C 只停止本次脚本启动的进程。Agent 从临时 JAR 副本运行，后续 Maven 构建不会覆盖正在运行的包；停止时清理副本。
+打开 **http://127.0.0.1:8080/graphics/**。脚本启动两个 Python MCP 服务和 FastAPI/LangGraph Agent；检测到本机 web-scan 已运行时直接复用，否则尝试用 `WEBSCAN_REPO/.venv/bin/python` 启动它。Ctrl-C 只停止本次脚本启动的进程。修改 Python 代码后需重启服务；不会因开发热重载自动中断或重复执行生成。
 
 输入物件描述，点击「生成 3D 模型」。页面始终提交 `THREE_D` 任务，后台在生图前检查 web-scan、Brush 和模型密钥。中间图片、技术配置和历史列表不出现在主界面；旧任务和图片仍保存在本地，概念图模式保留为 API 调试能力。
 
@@ -51,12 +51,12 @@ WEBSCAN_URL=http://127.0.0.1:8787
 
 ### 单独启动各服务
 
-在仓库根目录执行；Python MCP 自动读取 `.env`。直接运行 Java 时需要先导出对应环境变量。
+在仓库根目录执行；Agent 与 MCP 都自动读取 `.env`。
 
 ```bash
 .venv/bin/graphics-mcp creative --port 8766
 .venv/bin/graphics-mcp webscan --port 8767
-java -jar target/SpringAITest-0.0.1-SNAPSHOT.jar --spring.profiles.active=graphics
+.venv/bin/text2splat-agent
 ```
 
 | 服务 | 默认地址 | 用途 |
@@ -67,6 +67,14 @@ java -jar target/SpringAITest-0.0.1-SNAPSHOT.jar --spring.profiles.active=graphi
 | Web-scan | `127.0.0.1:8787` | COLMAP、Brush、3D viewer 和产物 |
 
 所有服务面向本机单用户使用。不要直接公开到互联网；第一版没有多用户鉴权。页面与 Agent 同源，不需要单独部署前端仓库。
+
+## Agent 框架与迁移
+
+当前版本固定使用 LangGraph **1.2.19**、LangChain **1.4.7**、langchain-openai **1.7.3** 和 SQLite checkpointer **3.1.3**。`langchain-openai` 在这里是智谱兼容接口适配器，不会改用 OpenAI 模型或启用新的收费服务。生图仍使用供应商专用 HTTP 接口。
+
+LangGraph 实际执行 `preflight → reference → multiview → import_views → start_reconstruction → wait_reconstruction → validate_result`；概念 API 分支在参考图完成后结束。模型调用发生在 Creative MCP 内，LangChain `StructuredTool` 通过官方 MCP Python SDK 连接两个内置服务。规划和审核保持固定职责，轮询与重建步骤由状态图控制，不额外让模型决定是否重复生图。
+
+升级前停止旧 Java Agent 与旧 MCP，保留 `.graphics/`，安装上述依赖后重新启动。原任务地址、请求标识、图片和结果继续可读；未完成任务按旧规则查询并清理下游，不自动重发生图或续训。SQLite 检查点记录节点状态，但不提供未经副作用核对的自动断点重放；当前未开放手动 replay API。
 
 ## 模型与重建路径
 
@@ -125,24 +133,25 @@ curl http://127.0.0.1:8080/api/graphics/jobs \
 工具表、调用约束、部署结构和验收清单见 [技术方案](docs/graphics-agent.md)。实现都在本仓库，**没有修改 web-scan 仓库**，它通过现有 HTTP API 被复用。
 
 ```text
-src/main/java/.../graphics/    Java MCP 客户端、任务编排、API
-src/main/resources/static/graphics/  无构建依赖的工作台
+agent/text2splat/             LangGraph 工作流、LangChain 工具、FastAPI
+agent/text2splat/static/graphics/  无构建依赖的工作台
+agent/tests/                  工作流、检查点、API 与真实 MCP SDK 测试
 mcp/graphics_mcp/             Creative / Web-scan MCP
 scripts/                     本地启动与进程管理
 .graphics/                   本地工作数据（忽略提交）
-  workflows/                 原子写入的 Java 任务记录
+  workflows/                 原子写入的任务记录（兼容旧 Java JSON）
   assets/                    生成图片及清单
   mcp.sqlite3                生图任务、幂等与 web-scan 映射
+  langgraph.sqlite3          LangGraph 节点检查点（thread_id = 任务 ID）
 ```
 
-web-scan 自己的数据库、训练缓存和 Gaussian 模型仍保存在它的数据目录。通过 `GRAPHICS_DATA_DIR` 修改 Agent 数据目录时，需要让 Java 与两个 MCP 使用相同路径。不要同时启动多个 Agent 或同种 MCP 操作同一数据目录。
+web-scan 自己的数据库、训练缓存和 Gaussian 模型仍保存在它的数据目录。通过 `GRAPHICS_DATA_DIR` 修改 Agent 数据目录时，需要让 Agent 与两个 MCP 使用相同路径。不要同时启动多个 Agent 或同种 MCP 操作同一数据目录。
 
 ## 验证
 
 ```bash
-mvn verify
-.venv/bin/python -m pytest mcp/tests -q
-node --check src/main/resources/static/graphics/studio.js
+.venv/bin/python -m pytest -q
+node --check agent/text2splat/static/graphics/studio.js
 node --test tests/*.test.mjs
 ```
 
@@ -150,8 +159,8 @@ node --test tests/*.test.mjs
 
 真实验收仍需配置个人 Key，分别尝试花瓶、香插、摆件，检查 12 张图、SfM 注册数量、PLY 和实际旋转观感。当前版本不宣称已完成真实生图到 3D 的质量验收。
 
-旧 RAG 测试需要 Redis、模型服务和 PDF，默认不运行。显式设置 `RUN_RAG_INTEGRATION=true` 与 `RAG_TEST_PDF` 后可运行。原聊天模块说明保存在 [历史文档](docs/legacy-chat.md)；本次升级到 Spring Boot **3.5.16** / Spring AI **1.1.8**，Java 目标版本仍为 **17**。
+旧 RAG 测试需要 Redis、模型服务和 PDF，默认不运行。显式设置 `RUN_RAG_INTEGRATION=true` 与 `RAG_TEST_PDF` 后可运行。原聊天模块说明保存在 [历史文档](docs/legacy-chat.md)；该历史模块使用 Spring Boot **3.5.16** / Spring AI **1.1.8**、Java **17**，可独立运行 `mvn verify`；它不再参与 3D Agent 执行。
 
 原仓库明文 API 配置已替换为环境变量。若原密钥曾有效，应在供应商后台撤销或轮换；删除当前文件中的值不会清除 Git 历史。
 
-运行原聊天模块时不传 `graphics` profile，并配置 `CHAT_API_KEY`、`CHAT_BASE_URL`、`CHAT_MODEL`、`MYSQL_URL`、`MYSQL_USER`、`MYSQL_PASSWORD`、`REDIS_HOST`、`REDIS_PORT`。旧模块仍依赖相应数据库和模型服务。
+运行原聊天模块需 JDK 17+ 和 Maven，并配置 `CHAT_API_KEY`、`CHAT_BASE_URL`、`CHAT_MODEL`、`MYSQL_URL`、`MYSQL_USER`、`MYSQL_PASSWORD`、`REDIS_HOST`、`REDIS_PORT`。旧模块仍依赖相应数据库和模型服务。
