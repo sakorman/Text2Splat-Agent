@@ -229,6 +229,44 @@ def test_text_and_vision_use_supported_output_modes(setup):
     assert len(requests) == 2
 
 
+def test_glm53_planning_uses_thinking_profile_without_changing_vision_or_images(setup):
+    settings, store, _, _ = setup
+    settings = replace(settings, text_model="glm-5.3-flash")
+    requests = []
+    def respond(request):
+        body = json.loads(request.content)
+        requests.append(body)
+        assert body["max_tokens"] == 4096
+        if body["model"] == "glm-5.3-flash":
+            assert body["thinking"] == {"type": "enabled", "clear_thinking": True}
+            assert body["reasoning_effort"] == "low"
+            assert body["response_format"] == {"type": "json_object"}
+            result = {"title": "花瓶", "object_prompt": "青瓷花瓶"}
+        else:
+            assert body["model"] == "glm-4.6v-flash" and body["thinking"] == {"type": "disabled"}
+            assert "reasoning_effort" not in body and "response_format" not in body
+            result = {"consistent": True, "reason": "一致"}
+        return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {
+            "role": "assistant", "content": json.dumps(result), "reasoning_content": "private"}}]})
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        provider = Providers(settings, client)
+        assert provider.plan("青瓷花瓶") == {"title": "花瓶", "object_prompt": "青瓷花瓶"}
+        assert provider.review(png(), [png(i + 1) for i in range(12)])["consistent"]
+    health = Creative(settings, store).health()
+    assert health["text_model"] == "glm-5.3-flash" and health["image_model"] == "cogview-3-flash"
+    assert not health["paid_enabled"] and len(requests) == 2
+
+
+def test_text_model_requires_explicit_selection_and_rejects_unknown_models(monkeypatch):
+    monkeypatch.delenv("ZHIPU_TEXT_MODEL", raising=False)
+    assert Settings().text_model == "glm-4.7-flash"
+    monkeypatch.setenv("ZHIPU_TEXT_MODEL", "glm-5.3-flash")
+    assert Settings().text_model == "glm-5.3-flash"
+    monkeypatch.setenv("ZHIPU_TEXT_MODEL", "unknown-model")
+    with pytest.raises(ValueError, match="ZHIPU_TEXT_MODEL"):
+        Settings()
+
+
 @pytest.mark.parametrize("choice", [
     {"message": {"content": "do-not-expose-secret"}},
     {"message": {"content": "[]"}},

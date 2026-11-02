@@ -306,3 +306,35 @@ web-scan 尚未提供原生请求幂等键，不能将“唯一采集与参数�
 ### 边界与后续
 
 本机仍未配置 ZHIPU_API_KEY，真实聊天、模型的生成意图判断、多视角一致性和最终 3D 质量未实际验收。测试证明普通回复路径不触发图形调用、只有有效原生工具调用能委派，并不证明真实模型绝不会误判用户意图；配置密钥后应评估否定、引用、澄清与方案确认等真实中文对话。聊天暂不提供逐 token 流式展示或任意多 Agent 自动扩展；旧 Spring AI 聊天仍是独立历史模块。
+
+## 2026-11-02：接入 GLM-5.3-Flash 与真实 API 验证
+
+### 实现
+
+开始时工作区干净，分支 `codex/local-graphics-agent` 与用户仓库 main 均为 `5fdc87b`，两条 CI 成功。用户提供密钥并说明 GLM-5.3-Flash 有已生效的 500 万赠送 token 资源包，授权使用该模型测试。此前 GLM-4.7-Flash 的实际返回是 HTTP 429 / 1305（访问量过大），不是余额不足；没有自动重试或切换付费模型。
+
+- 新增 `ZHIPU_TEXT_MODEL`，聊天主管、ReAct 专家和设计 JSON 规划共用。仓库示例仍默认免费 `glm-4.7-flash`，本机按用户选择设为 `glm-5.3-flash`；未知模型明确拒绝，没有自动回退。健康接口报告实际配置模型。
+- 为 5.3 采用强制 `thinking.type=enabled`、`clear_thinking=true`、`reasoning_effort=low`；保持聊天/决策 1024、设计规划 4096 的输出上限、原有超时和禁重试规则。CogView 生图与 4.6V 视觉审核没有切换，付费图片开关仍关闭。
+- 增加小型 LangChain ZhipuChatModel 适配器。供应商若返回 reasoning_content，仅按程序生成的消息 ID 在当前任务内存中关联，后续工具轮次原样回传；不进入 LangChain 消息、检查点、长期记忆、API 或页面。保留消息 ID 让上下文压缩后仍能准确对应，丢弃旧交互时同步清理；结束/失败/取消时清空，不允许凭空恢复丢失的工具上下文。
+- 真实接口在开启思考的轻量请求中也可能完全省略 reasoning_content，已验证这种响应可以继续工具往返；缺省时不补造思考文本。带非空思考字段的回传和压缩由 HTTP 契约测试覆盖，不冒充真实供应商已返回该字段的验收。
+- 仅本机忽略提交的 `.env` 保存密钥和模型选择，权限 0600。确认旧任务已结束后重启本项目拥有的 Agent/MCP，既有 web-scan 进程与 4 个旧任务保留。没有购买服务、下载权重或请求图片/训练。
+
+### 来源与取舍
+
+查阅日期：2026-11-02；官方网页未提供统一发布日期，不称为当天发布的新能力。
+
+- [GLM-5.3-Flash 模型说明](https://docs.bigmodel.cn/cn/guide/models/vlm/glm-5.3-flash)与[深度思考参数](https://docs.bigmodel.cn/cn/guide/capabilities/thinking)：该模型不能传 thinking.disabled，支持 low effort。使用标准 API；没有切到独立 Coding Plan 端点，也没有更换图像模型。
+- [交错/保留式思考](https://docs.bigmodel.cn/cn/guide/capabilities/thinking-mode)：工具交互需要回传实际供应商思考字段，clear_thinking 不等同于关闭思考。核对本机固定版本 langchain-openai 1.7.3 源码会丢弃此非标准字段，选择请求/响应边界的小型适配，不升级框架或增加依赖，也不把思考正文持久化。
+- [官方价格表](https://docs.bigmodel.cn/cn/guide/start/pricing)：5.3-Flash 为计量模型，赠送资源包不能等同于永久免费；README 说明余额、有效期与适用范围以控制台为准。目前没有余额查询或资源包耗尽自动停用能力，不声称可以保证只消耗赠送部分。
+- [官方错误码](https://docs.bigmodel.cn/cn/api/api-code)：区分实际观察到的 1305 模型繁忙与 1113 账户欠费，不根据 HTTP 429 直接推断余额不足。
+
+### 验证
+
+- 187 项 Python、11 项 Node 测试通过，共 198 项；依赖检查和 Git 差异检查通过。新增/扩展契约覆盖两种模型、强制思考参数、带思考和缺省思考的工具往返、8 轮循环中的上下文压缩、缓存清理、跨任务隔离、丢失上下文拒绝、健康模型名、错误单次请求与不回退。既有 4.7 免费默认契约继续通过。
+- 真实标准 API 最小探测返回 HTTP 200 / `OK`，该次 usage 为 24 tokens（仅指最初探测，不是本轮总用量）。真实 ChatModel 正确返回 `generate_3d_model` 原生调用，测试只检查调用内容、不执行生成 MCP；真实 ReActModel 完成 inspect_task → 明确测试观察 → stop 两轮，观察是只读测试数据，没有构造重建成功。真实设计规划返回有效标题和 object_prompt JSON。
+- 通过本机 8088 正常聊天 API 连续发送问候、明确“不生成”的青瓷小鸟设计讨论、追问上轮物件，三条均 COMPLETED、jobId=null，能正确回忆青瓷小鸟；生成任务数保持 4。证据保存在忽略提交的 `.graphics/live-qa/`，没有写入测试凭据或思考正文。
+- 重启后健康接口中 Agent 决策与 Creative 设计模型均为 glm-5.3-flash，生图仍为 cogview-3-flash，视觉仍为 glm-4.6v-flash，paid_enabled=false（该字段仅表示付费图片开关，不表示文本模型免费）。
+
+### 边界与后续
+
+当前已验证真实聊天和有限工具协议样例，不代表完整意图误触发率、长期记忆质量、多视角一致性或真实 3D 重建验收。下一步仍需独立验收真实图片与 SfM/PLY；不能把本轮文本模型成功写成 3D 已生成。现有资源包实际余量需在用户控制台查看。

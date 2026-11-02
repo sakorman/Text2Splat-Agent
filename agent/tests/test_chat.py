@@ -237,12 +237,14 @@ async def test_different_conversations_do_not_share_raw_dialogue(chat_rig):
     assert store.list() == []
 
 
-async def test_native_chat_model_http_tool_call_reaches_actual_mcp_and_specialist(chat_rig):
+@pytest.mark.parametrize('text_model', ['glm-4.7-flash', 'glm-5.3-flash'])
+async def test_native_chat_model_http_tool_call_reaches_actual_mcp_and_specialist(chat_rig, text_model):
     chat, (workflow, store, tools, _) = chat_rig
     payloads = []
     def respond(request):
         body = json.loads(request.content)
         payloads.append(body)
+        assert body['model'] == text_model
         schema = body['tools'][0]['function']['parameters']
         assert set(schema['properties']) == {'description'}
         assert not {'response_format', 'parallel_tool_calls', 'strict'}.intersection(body)
@@ -250,10 +252,11 @@ async def test_native_chat_model_http_tool_call_reaches_actual_mcp_and_specialis
             'message': {'role': 'assistant', 'content': 'untrusted completion claim', 'reasoning_content': 'private',
                         'tool_calls': [{'id': 'delegate-call', 'type': 'function', 'function': {
                             'name': 'generate_3d_model', 'arguments': json.dumps({'description': '青瓷花瓶'})}}]}}]})
-    chat.model = ChatModel(AgentSettings(zhipu_key='test-secret'), httpx.MockTransport(respond))
+    chat.model = ChatModel(AgentSettings(zhipu_key='test-secret', text_model=text_model), httpx.MockTransport(respond))
     turn = await send(chat, '生成一个青瓷花瓶')
     await asyncio.wait_for(workflow.queue.join(), 3)
     assert turn['delegation']['tool'] == 'generate_3d_model' and len(payloads) == 1
     assert store.get(turn['jobId'])['status'] == 'READY' and tools.calls['creative_generate_reference'] == 1
     checkpoint = await chat.graph.aget_state({'configurable': {'thread_id': 'chat:' + turn['id']}})
     assert all(word not in str(checkpoint.values) for word in ['test-secret', 'private', 'untrusted completion claim'])
+    assert not chat.model._reasoning_history

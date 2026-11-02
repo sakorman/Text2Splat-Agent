@@ -12,6 +12,7 @@ from openai import APIConnectionError, APIStatusError
 
 from .settings import Settings
 from .store import MAX_IMAGE_BYTES
+from .text_models import text_request_options
 
 ZHIPU = "https://open.bigmodel.cn/api/paas/v4"
 ARK = "https://ark.cn-beijing.volces.com/api/v3"
@@ -46,7 +47,8 @@ class Providers:
                                api_key=self.settings.zhipu_key, http_client=self.client,
                                max_retries=0, timeout=180, stream_usage=False,
                                use_responses_api=False,
-                               extra_body={"max_tokens": 4096, "thinking": {"type": "disabled"}})
+                               extra_body=({"max_tokens": 4096, "thinking": {"type": "disabled"}}
+                                           if model == "glm-4.6v-flash" else text_request_options(model, 4096)))
         if json_mode:  # Zhipu supports response_format on text models only.
             chat = chat.bind(response_format={"type": "json_object"})
         try:
@@ -75,7 +77,7 @@ class Providers:
             raise ProviderError("模型未返回完整 JSON，请创建新版本重试") from None
 
     def plan(self, prompt):
-        result = self.chat_json("glm-4.7-flash", [
+        result = self.chat_json(self.settings.text_model, [
             {"role": "system", "content": (
                 '你是文创物件设计助手。把用户要求转换为单个静态物件的明确外观规格。'
                 '返回 JSON：{"title":"不超过30字","object_prompt":"中文外观描述"}。'

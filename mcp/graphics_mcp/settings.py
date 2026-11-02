@@ -3,6 +3,8 @@ from pathlib import Path
 import os
 from urllib.parse import urlsplit
 
+from .text_models import text_model_from_env
+
 
 def local_url(value: str) -> str:
     url = urlsplit(value)
@@ -15,6 +17,7 @@ def local_url(value: str) -> str:
 class Settings:
     data_dir: Path = field(default_factory=lambda: Path(os.getenv("GRAPHICS_DATA_DIR", ".graphics")).resolve())
     zhipu_key: str = field(default_factory=lambda: os.getenv("ZHIPU_API_KEY", ""), repr=False)
+    text_model: str = field(default_factory=text_model_from_env)
     ark_key: str = field(default_factory=lambda: os.getenv("ARK_API_KEY", ""), repr=False)
     image_provider: str = field(default_factory=lambda: os.getenv("IMAGE_PROVIDER", "cogview"))
     allow_paid: bool = field(default_factory=lambda: os.getenv("ALLOW_PAID_IMAGE_API", "false").lower() == "true")

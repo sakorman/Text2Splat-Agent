@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 from graphics_mcp.settings import local_url
+from graphics_mcp.text_models import text_model_from_env
 
 
 @dataclass(frozen=True)
@@ -14,4 +15,5 @@ class AgentSettings:
     job_timeout: float = 7200.0
     mcp_timeout: float = 90.0
     zhipu_key: str = field(default_factory=lambda: os.getenv("ZHIPU_API_KEY", ""), repr=False)
+    text_model: str = field(default_factory=text_model_from_env)
     model_timeout: float = 45.0

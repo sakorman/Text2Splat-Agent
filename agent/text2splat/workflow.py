@@ -116,7 +116,7 @@ class Workflow:
     async def health(self):
         self.memory_call(lambda: self.memory.list(1), [])
         result = {"engine": "langgraph", "tool_framework": "langchain", "agent_loop": "react",
-                  "decision_model": "glm-4.7-flash", "decision_configured": bool(self.settings.zhipu_key),
+                  "decision_model": self.settings.text_model, "decision_configured": bool(self.settings.zhipu_key),
                   "max_decisions": self.MAX_ROUNDS}
         result["memory"] = {"long_term": "local_sqlite", "available": self.memory_available,
                             "retrieval": "lexical", "context_budget_characters": 12000,
@@ -146,6 +146,8 @@ class Workflow:
                                       message="服务重启，原任务已中断；未自动重发生图或训练。" if clean else
                                       "服务重启，尚未确认下游停止。恢复 MCP 服务后再次取消。")
             finally:
+                if isinstance(self.model, ReActModel):
+                    self.model.clear_reasoning()
                 self.memory_call(lambda: self.memory.record_job(self.store.get(jid)), False)
                 self.active = None
                 self.queue.task_done()
@@ -229,7 +231,7 @@ class Workflow:
         ids = [c.get("id") for c in reply.tool_calls]
         if any(not isinstance(i, str) or not i or len(i) > 160 for i in ids) or len(set(ids)) != len(ids):
             raise ToolFailure("Agent 工具调用标识无效，未执行工具")
-        return {"rounds": rounds, "messages": [AIMessage(content="", tool_calls=reply.tool_calls)],
+        return {"rounds": rounds, "messages": [AIMessage(id=reply.id, content="", tool_calls=reply.tool_calls)],
                 "context_summary": context.summary, "context_stats": context.stats}
 
     def observation(self, state):
