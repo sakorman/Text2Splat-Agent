@@ -51,16 +51,18 @@ class MemoryStore:
             return [json.loads(r[0]) for r in db.execute(
                 "SELECT payload FROM memories ORDER BY updated_at DESC, id LIMIT ? OFFSET ?", (limit, offset))]
 
-    def set_preference(self, key, value, *, source_job_id=None, evidence=None):
+    def set_preference(self, key, value, *, source_job_id=None, evidence=None, source_turn_id=None):
         if not re.fullmatch(r"[a-z0-9_-]{1,64}", key):
             raise ValueError("偏好名称只能包含小写字母、数字、下划线和短横线")
         if not isinstance(value, str) or not 2 <= len(value.strip()) <= 200:
             raise ValueError("偏好内容应为 2–200 字")
         if source_job_id is not None:
             valid_id(source_job_id)
+        if source_turn_id is not None:
+            valid_id(source_turn_id)
         stamp, mid = now(), "pref:" + key
         item = dict(id=mid, kind="preference", value=value.strip(), source="user_explicit",
-                    source_job_id=source_job_id, evidence=evidence, updated_at=stamp)
+                    source_job_id=source_job_id, source_turn_id=source_turn_id, evidence=evidence, updated_at=stamp)
         with self.connection() as db:
             # An explicit new user update is allowed to restore a deleted preference.
             db.execute("DELETE FROM forgotten WHERE id=?", (mid,))
@@ -69,7 +71,7 @@ class MemoryStore:
                        (mid, "preference", json.dumps(item, ensure_ascii=False), stamp, stamp))
         return item
 
-    def capture_explicit_preference(self, prompt, job_id):
+    def capture_explicit_preference(self, prompt, job_id=None, *, turn_id=None):
         # Only a standalone explicit remember request. Object adjectives are not a user profile.
         patterns = [r"(?:^|\n)\s*(?:请)?记住(?:我的偏好[：:]\s*|我(?:喜欢|偏好)\s*)([^\n。！？!?]{2,200})(?=[\n。！？!?]|$)",
                     r"(?:^|\n)\s*remember (?:that )?I (?:prefer|like) ([^\n.!?]{2,200})(?=[\n.!?]|$)"]
@@ -77,7 +79,7 @@ class MemoryStore:
             match = re.search(pattern, prompt, re.IGNORECASE)
             if match and len(match[1].strip()) >= 2:
                 return self.set_preference("explicit-description", match[1], source_job_id=job_id,
-                                           evidence=match[0].strip())
+                                           source_turn_id=turn_id, evidence=match[0].strip())
         return None
 
     def record_job(self, job):

@@ -298,3 +298,23 @@ textarea:disabled {
     transition: none !important;
   }
 }
+
+/* Conversation remains part of the same quiet, single-column workspace. */
+.composer { margin-top: 26px; }
+.composer textarea { min-height: 110px; }
+.workspace.has-conversation { margin-top: 30px; }
+.has-conversation .compose { display: none; }
+.conversation { max-height: min(52vh, 520px); overflow-y: auto; overscroll-behavior: contain; padding: 4px 8px; }
+.chat-message { margin: 0 0 26px; max-width: 92%; }
+.chat-message.user { margin-left: auto; padding: 14px 20px; background: #e8f0f4; border-radius: 18px 18px 4px 18px; }
+.chat-label { display: block; color: #607685; font-size: 12px; margin-bottom: 7px; }
+.chat-message p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.85; font-size: 16px; }
+.chat-error p { color: #a23e36; }
+.has-conversation .result { margin-bottom: 22px; }
+@media (max-width: 600px) {
+  .workspace.has-conversation { margin-top: 18px; }
+  .conversation { max-height: 44vh; padding: 2px 4px; }
+  .chat-message { max-width: 96%; }
+  .chat-message.user { padding: 12px 16px; }
+  .composer textarea { min-height: 100px; }
+}
