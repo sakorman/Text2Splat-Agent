@@ -90,3 +90,29 @@ def test_assets_reject_absent_invalid_names_and_symlinks(client, tmp_path):
     for name in ("01.png", "02.png", "manifest.json", "anything.png"):
         assert client.get(prefix + name).status_code == 404
     assert client.get("/api/graphics/assets/invalid/00.png").status_code == 404
+
+
+def test_memory_preferences_can_be_inspected_updated_and_forgotten(client):
+    assert client.get("/api/graphics/memories").json() == []
+    route = "/api/graphics/memories/preferences/material"
+    saved = client.put(route, json={"value": "哑光青瓷"})
+    assert saved.status_code == 200 and saved.json()["source"] == "user_explicit"
+    assert client.put(route, json={"value": "浅色木雕"}).status_code == 200
+    records = client.get("/api/graphics/memories")
+    assert records.headers["cache-control"] == "no-store"
+    assert len(records.json()) == 1 and records.json()[0]["value"] == "浅色木雕"
+    assert client.delete("/api/graphics/memories/pref:material").json()["deleted"] == 1
+    assert client.get("/api/graphics/memories").json() == []
+    assert client.put(route, json={"value": "a" * 201}).status_code == 400
+    assert client.get("/api/graphics/memories?limit=1000").status_code == 400
+    assert client.delete("/api/graphics/memories/invalid").status_code == 400
+    assert client.get("/api/graphics/jobs").json() == []
+
+
+def test_memory_modification_obeys_local_same_origin_policy(client):
+    route = "/api/graphics/memories/preferences/style"
+    headers = {"origin": "https://untrusted.example"}
+    assert client.put(route, json={"value": "简约"}, headers=headers).status_code == 403
+    client.put(route, json={"value": "简约"})
+    assert client.delete("/api/graphics/memories", headers=headers).status_code == 403
+    assert client.delete("/api/graphics/memories").json()["deleted"] == 1
