@@ -31,6 +31,7 @@ def test_minimal_static_page_health_and_headers(client):
         assert client.get("/graphics/" + name).status_code == 200
     health = client.get("/api/graphics/health")
     assert health.json()["engine"] == "langgraph" and health.json()["tool_framework"] == "langchain"
+    assert health.json()["agent_loop"] == "react" and health.json()["max_decisions"] == 12
     assert health.headers["cache-control"] == "no-store"
 
 

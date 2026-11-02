@@ -71,7 +71,7 @@ class CreateRequest(BaseModel):
         return value.strip() if isinstance(value, str) else value
 
 
-def create_app(settings=None, tools=None):
+def create_app(settings=None, tools=None, model=None):
     settings = settings or AgentSettings()
 
     @asynccontextmanager
@@ -80,7 +80,7 @@ def create_app(settings=None, tools=None):
         try:
             async with AsyncSqliteSaver.from_conn_string(str(settings.data_dir / "langgraph.sqlite3")) as saver:
                 await saver.setup()
-                workflow = Workflow(settings, store, tools or McpTools(settings), saver)
+                workflow = Workflow(settings, store, tools or McpTools(settings), saver, model=model)
                 app.state.store, app.state.workflow = store, workflow
                 await workflow.start()
                 try:

@@ -14,21 +14,27 @@
 
 | 组件 | 职责 | 数据 / 调用 |
 | --- | --- | --- |
-| LangGraph + FastAPI Agent | 状态图、持久化任务、取消、SSE、前端 | SQLite 检查点、兼容旧 JSON，LangChain MCP 工具 |
+| LangGraph + FastAPI Agent | ReAct 循环、持久化任务、取消、SSE、前端 | SQLite 检查点、兼容旧 JSON，LangChain MCP 工具 |
 | Creative MCP | GLM 设计规格、CogView / Seedream 图片、GLM 视觉检查 | SQLite 生图队列、本地图片 |
 | Web-scan MCP | 翻译为现有 web-scan API、幂等导入和训练提交 | 资产集合 ID → session ID → job ID |
 | web-scan | 图片验证、SfM、Brush、本地导出 | 原有数据库、队列和 artifacts |
 | web-scan viewer | 真实 Gaussian 渲染、旋转与下载 | `?p={sessionId}&j={jobId}` |
 
-模型负责设计内容与外观判断，LangGraph 使用固定状态图调用内置 MCP，LangChain 接入文本规划与视觉审核模型。训练轮询由异步工作队列完成，不让大模型反复消耗 token 查询进度。MCP 只交换 ID、小型元数据和结果链接，不将 PLY 或大批图片塞进模型上下文。
+模型负责下一步行动选择、设计内容与外观判断。LangGraph 执行模型—工具循环，LangChain 绑定原生工具调用及文本/视觉模型。训练轮询由异步工作队列完成，不让大模型反复消耗 token 查询进度。MCP 只交换 ID、小型元数据和结果链接，不将 PLY 或大批图片塞进模型上下文。
 
-## LangGraph 执行与检查点
+## ReAct 主循环与检查点
 
-`agent/text2splat/workflow.py` 构建并编译 StateGraph，依次执行预检、参考图、候选视图、导入、启动重建、轮询与产物检查。`thread_id` 使用原任务 ID，AsyncSqliteSaver 在节点边界同步持久化；原 JSON 记录继续服务页面，并在每次生图或训练提交前记录请求意图。
+`agent/text2splat/workflow.py` 的 StateGraph 为 `preflight → model ⇄ tools → finish`，不再通过固定边依次调用全部阶段。`react.py` 用 LangChain `bind_tools` 将工具 schema 提交给 GLM-4.7-Flash；模型产生原生 tool_calls，执行结果以对应 tool_call_id 的 ToolMessage 返回，驱动下一轮决策。它不依赖解析文本中的 Thought/Action，也不要求输出思维链。
+
+模型工具为参考图、候选视图、导入、重建、验证、任务检查、完成和停止。前五个工具调用已有 MCP 服务，并在程序内等待结果；可选的 `design_hint` 只能作为原始描述的补充。工具参数不接受其他任务 ID、路径、费用开关或供应商配置；每次执行都检查当前任务的前置条件。
+
+决策上限 12 轮，每轮输出上限 1024 tokens、等待上限 45 秒，每次只能选择一个工具；多调用批次不部分执行。代码记录有效操作意图，防止再次执行生成、导入、训练或验证。参数/阶段拒绝会返回观察，允许模型纠正；真实工具失败会先清理下游，后续只能检查失败或停止，保留 FAILED / NEEDS_REVIEW / CANCELLING 的原有语义。模型返回结束文本时仍检查证据，不能用声明替代真实 Gaussian PLY。
+
+`thread_id` 使用原任务 ID，AsyncSqliteSaver 在节点边界同步持久化工具调用与观察；原 JSON 记录继续服务页面，并在每次生图或训练提交前记录请求意图。模型回复中的解释、供应商 reasoning_content 和元数据不会写入检查点。不同任务使用独立消息历史，不自动共享上下文。
 
 不在有副作用的节点配置 RetryPolicy，也不在服务重启时对未完成检查点直接调用 `ainvoke(None)`。已有意图只允许查询原结果；查询为空仍不重发提交。重启保留此前的中断清理行为。检查点与下游执行不是同一个事务，不能把该实现称为 exactly-once 或保证自动续跑。
 
-LangChain 的模型适配器显式关闭 SDK 重试（`max_retries=0`），限定智谱 Chat Completions 端点；文本 JSON 模式与视觉提示词 JSON 解析继续分别处理。图片接口没有统一的 ChatModel 契约，因此沿用已有供应商图片适配器。MCP 工具采用固定白名单和参数 schema，解析既有 `ok/data/error` 信封；不启用 LangChain 原生 MCP beta 或迁移 MCP v2。
+LangChain 的模型适配器显式关闭 SDK 重试（`max_retries=0`），限定智谱 Chat Completions 端点；ReAct 只发送供应商支持的 `tool_choice=auto`，不附带 JSON 模式、strict 或 parallel_tool_calls。MCP 内的文本规划 JSON 模式与视觉提示词 JSON 解析继续分别处理。图片接口没有统一的 ChatModel 契约，因此沿用已有供应商图片适配器。MCP 工具采用固定白名单和参数 schema，解析既有 `ok/data/error` 信封；不启用 LangChain 原生 MCP beta 或迁移 MCP v2。
 
 ## MCP 工具契约
 
@@ -96,6 +102,12 @@ LangChain 的模型适配器显式关闭 SDK 重试（`max_retries=0`），限�
 
 若免费路径持续无法通过 SfM，后续应评估参考图条件模型或真正的多视角生成模型，不能通过放宽几何门槛、虚构相机外参或改用 STL 来宣称完成。
 
+## ReAct 运行与验证边界
+
+Agent 和 Creative MCP 都从本地 `.env` 读取同一个 `ZHIPU_API_KEY`，浏览器不接触密钥。健康接口返回决策模型配置状态和轮数上限；任务 API 记录 `agentLoop`、`agentRounds`、`agentActions`。正常 3D 流程约有 6 次决策模型请求，检查与纠错可能增加至 12 次，原有设计规划和视觉审核另计。取消和总超时在等待模型时也会检查，停止等待不代表供应商撤销了已收到的请求。
+
+现有证据包括原生 function calling 的 HTTP 契约替身与真实 LangGraph 循环测试；未配置密钥时不能宣称已验证真实 GLM 的工具选择质量。ReAct 不会让独立文生图自动具备多视角几何一致性，也不绕过真实重建门槛。
+
 ## 官方接口参考
 
 - [智谱模型价格](https://docs.bigmodel.cn/cn/guide/start/pricing)
@@ -104,3 +116,8 @@ LangChain 的模型适配器显式关闭 SDK 重试（`max_retries=0`），限�
 - [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk)
 - [LangGraph 持久化与检查点](https://docs.langchain.com/oss/python/langgraph/persistence)
 - [LangChain MCP 文档](https://docs.langchain.com/oss/python/langchain/mcp)
+
+- [ReAct 论文](https://arxiv.org/abs/2210.03629)
+- [LangGraph Workflows and agents](https://docs.langchain.com/oss/python/langgraph/workflows-agents)
+- [GLM-4.7-Flash 工具调用能力](https://docs.bigmodel.cn/cn/guide/models/free/glm-4.7-flash)
+- [智谱对话补全参数](https://docs.bigmodel.cn/api-reference/模型-api/对话补全)
