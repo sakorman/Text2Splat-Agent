@@ -229,6 +229,29 @@ async def test_model_timeout_does_not_start_generation_and_worker_handles_next_t
     assert second['status'] == 'COMPLETED' and store.list() == [] and not tools.calls
 
 
+@pytest.mark.parametrize('status,code,expected', [(429, '1305', '暂时繁忙'), (429, 1113, '账户欠费'),
+                                                (403, '1220', '访问权限'), (429, 'unknown', '无法判断余额')])
+async def test_model_failure_diagnostic_reaches_chat_without_generation_or_secret_leak(chat_rig, status, code, expected):
+    chat, (_, store, tools, _) = chat_rig
+    calls = []
+
+    def reject(request):
+        calls.append(request)
+        return httpx.Response(status, json={'error': {'code': code, 'message': 'private-provider-body'}})
+
+    chat.model = ChatModel(AgentSettings(zhipu_key='test-secret', text_model='glm-5.3-flash'),
+                           httpx.MockTransport(reject))
+    turn = await send(chat)
+    assert turn['status'] == 'FAILED' and expected in turn['assistant']
+    assert '未自动重试' in turn['assistant'] and len(calls) == 1
+    assert turn['jobId'] is None and not store.list() and not tools.calls
+    checkpoint = await chat.graph.aget_state({'configurable': {'thread_id': 'chat:' + turn['id']}})
+    assert all(secret not in str(turn) + str(checkpoint.values) for secret in ['private-provider-body', 'test-secret'])
+    chat.model = ConversationModel()
+    next_turn = await send(chat, '接着聊聊', turn['conversationId'], 'after-error')
+    assert next_turn['status'] == 'COMPLETED' and not store.list()
+
+
 async def test_different_conversations_do_not_share_raw_dialogue(chat_rig):
     chat, (_, store, _, _) = chat_rig
     first = await send(chat, '仅这次聊天提及红色星球')

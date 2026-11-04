@@ -278,3 +278,21 @@ async def test_decision_provider_fails_once_and_sanitizes(failure, text_model):
     with pytest.raises(ToolFailure) as caught:
         await model.ainvoke([HumanMessage("花瓶")])
     assert len(calls) == 1 and "secret-details" not in str(caught.value)
+
+
+@pytest.mark.parametrize("code,expected", [("1305", "暂时繁忙"), ("1113", "账户欠费")])
+async def test_react_reports_model_failure_without_starting_graphics_or_retrying(rig, code, expected):
+    workflow, _, tools, _ = rig
+    calls = []
+
+    def reject(request):
+        calls.append(request)
+        return httpx.Response(429, json={"error": {"code": code, "message": "private-provider-body"}})
+
+    workflow.model = ReActModel(AgentSettings(zhipu_key="test-secret", text_model="glm-5.3-flash"),
+                                httpx.MockTransport(reject))
+    job = await complete(workflow)
+    assert job["status"] == "FAILED" and expected in job["message"]
+    assert len(calls) == 1 and not tools.calls["creative_generate_reference"]
+    checkpoint = await workflow.graph.aget_state({"configurable": {"thread_id": job["id"]}})
+    assert all(secret not in str(job) + str(checkpoint.values) for secret in ["private-provider-body", "test-secret"])
