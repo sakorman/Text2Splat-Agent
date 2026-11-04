@@ -44,6 +44,8 @@ WEBSCAN_URL=http://127.0.0.1:8787
 
 已有 GLM-5.3-Flash 资源包时，可将 `ZHIPU_TEXT_MODEL` 改为 `glm-5.3-flash` 后重启。聊天主管、3D 专家的 ReAct 决策和 Creative MCP 的设计规划共用此配置；视觉审核与图片模型独立。GLM-5.3-Flash 是计量模型，赠送 token 不等于永久免费，资源包适用范围、有效期与剩余额度以智谱控制台为准；应用不会自动查询余额或在资源包耗尽前拦截，HTTP 错误也不会触发换模型或重试。[官方模型与计费说明](https://docs.bigmodel.cn/cn/guide/start/pricing)
 
+聊天、ReAct 决策、设计规划、生图和视觉审核共用错误诊断：智谱 `429 / 1305` 表示模型繁忙，`429 / 1302` 表示请求频率受限，`429 / 1113` 表示供应商报告账户欠费，`403 / 1220` 表示没有访问权限。请根据提示核对控制台的资源包、权限或限额；仅凭未知的 HTTP 429 无法判断余额。提示只展示已核对的错误码与固定说明，不展示供应商原始正文，也不自动重试或改用其他模型。[官方错误码](https://docs.bigmodel.cn/cn/api/api-code)
+
 ```bash
 ./scripts/start-graphics.sh
 ```

@@ -11,6 +11,7 @@ from langchain_core.messages import convert_to_messages
 from openai import APIConnectionError, APIStatusError
 
 from .settings import Settings
+from .provider_errors import http_failure_message
 from .store import MAX_IMAGE_BYTES
 from .text_models import text_request_options
 
@@ -34,9 +35,7 @@ class Providers:
             response.raise_for_status()
             return response.json()
         except httpx.HTTPStatusError as exc:
-            status = exc.response.status_code
-            messages = {401: "API Key 无效", 403: "模型权限或免费额度不足", 429: "模型调用达到限额，请稍后创建新版本"}
-            raise ProviderError(messages.get(status, f"模型服务返回 HTTP {status}；未自动重试")) from None
+            raise ProviderError(http_failure_message(exc.response, zhipu=base == ZHIPU)) from None
         except (httpx.RequestError, ValueError):
             raise ProviderError("模型请求超时或返回格式异常；结果未知，未自动重试") from None
 
@@ -54,8 +53,7 @@ class Providers:
         try:
             reply = chat.invoke(convert_to_messages(messages))
         except APIStatusError as exc:
-            messages = {401: "API Key 无效", 403: "模型权限或免费额度不足", 429: "模型调用达到限额，请稍后创建新版本"}
-            raise ProviderError(messages.get(exc.status_code, f"模型服务返回 HTTP {exc.status_code}；未自动重试")) from None
+            raise ProviderError(http_failure_message(exc.response, zhipu=True)) from None
         except APIConnectionError:
             raise ProviderError("模型请求超时；结果未知，未自动重试") from None
         except Exception:

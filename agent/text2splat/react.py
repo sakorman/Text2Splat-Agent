@@ -6,6 +6,7 @@ from openai import APIConnectionError, APIStatusError
 from pydantic import BaseModel, ConfigDict, Field
 
 from graphics_mcp.providers import ZHIPU
+from graphics_mcp.provider_errors import http_failure_message
 from graphics_mcp.text_models import QUOTA_TEXT_MODEL, ZhipuChatModel, text_request_options
 from .tools import ToolFailure
 
@@ -85,7 +86,7 @@ class ReActModel:
                 # No unsupported parallel_tool_calls/strict or JSON-mode parameters.
                 reply = await model.ainvoke([SystemMessage(self.system), *messages])
         except APIStatusError as exc:
-            raise ToolFailure(f"Agent 决策模型返回 HTTP {exc.status_code}；未自动重试") from None
+            raise ToolFailure(http_failure_message(exc.response, zhipu=True)) from None
         except APIConnectionError:
             raise ToolFailure("Agent 决策模型连接失败；未自动重试") from None
         except Exception:
