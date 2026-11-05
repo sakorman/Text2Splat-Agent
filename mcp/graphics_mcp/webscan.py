@@ -133,8 +133,17 @@ class Webscan:
             return linked
 
     def cancel(self, job_id):
-        data = self.request("POST", f"/api/jobs/{valid_id(job_id)}/cancel")
-        return {"id": data["id"], "status": data["status"]}
+        requested = valid_id(job_id)
+        data = self.request("POST", f"/api/jobs/{requested}/cancel")
+        # The local service may return a terminal state when a cancellation
+        # races with completion.  Both the ID and state must still be part of
+        # the acknowledgement; otherwise callers could confirm a different
+        # job or an unrecognised state by accident.
+        if not isinstance(data, dict) or data.get("id") != requested:
+            raise ValueError("web-scan 取消回执的任务标识不匹配")
+        if data.get("status") not in {"cancelled", "failed", "succeeded"}:
+            raise ValueError("web-scan 取消回执状态无效")
+        return {"id": requested, "status": data["status"]}
 
     def result(self, job_id):
         status = self.status(job_id)

@@ -473,11 +473,22 @@ class Workflow:
             train = field == "trainRequest"
             try:
                 found = await self.tools.call("webscan_get_request" if train else "creative_get_request", {"request_id": job[field]})
-                if "job" not in found:
+                if not isinstance(found, dict) or "job" not in found:
                     raise ToolFailure("查询返回格式异常")
-                if found["job"] is not None:
-                    child = valid_id(found["job"].get("job_id" if train else "id"))
-                    await self.tools.call("webscan_cancel_reconstruction" if train else "creative_cancel_job", {"job_id": child})
+                if found["job"] is None:
+                    raise ToolFailure("下游任务未找到，暂时无法确认已停止")
+                child = valid_id(found["job"].get("job_id" if train else "id"))
+                cancelled = await self.tools.call(
+                    "webscan_cancel_reconstruction" if train else "creative_cancel_job",
+                    {"job_id": child},
+                )
+                if not isinstance(cancelled, dict) or cancelled.get("id") != child:
+                    raise ToolFailure("取消回执的任务标识不匹配")
+                # A terminal success/failure/review state means the provider
+                # is no longer running. Queued/running (or an unknown value)
+                # is not proof that cancellation completed.
+                if cancelled.get("status") not in {"cancelled", "failed", "succeeded", "needs_review"}:
+                    raise ToolFailure("取消回执状态无效")
             except Exception:
                 complete = False
         return complete
