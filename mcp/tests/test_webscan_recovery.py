@@ -76,6 +76,22 @@ def test_lost_start_recovers_matching_job_not_newest_job_and_persists_it(service
     assert len(service.posts) == 1
 
 
+@pytest.mark.parametrize("payload", [{"id": "c" * 32, "status": "cancelled"},
+                                      {"id": "b" * 32, "status": "running"}])
+def test_cancel_requires_matching_id_and_terminal_ack(service, payload):
+    service.response_mode = "success"
+
+    def respond(request):
+        if request.method == "POST" and request.url.path.endswith("/cancel"):
+            return httpx.Response(200, json=payload)
+        raise AssertionError((request.method, request.url.path))
+
+    service.client.close()
+    service.client = httpx.Client(base_url=service.settings.webscan_url, transport=httpx.MockTransport(respond))
+    with pytest.raises(ValueError, match="取消回执"):
+        service.adapter().cancel(service.job_id)
+
+
 def test_unknown_start_never_reposts_even_before_the_job_becomes_visible(service):
     service.response_mode = "timeout_before_commit"
     lose_start_response(service)

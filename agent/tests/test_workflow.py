@@ -54,6 +54,7 @@ class FakeTools:
         self.fail_training = False
         self.missing_ply = False
         self.block = False
+        self.cancel_ack = "valid"
         self.entered, self.release = asyncio.Event(), asyncio.Event()
 
     async def call(self, name, args):
@@ -92,7 +93,11 @@ class FakeTools:
             return {"viewer_url": "http://127.0.0.1:8787/?p=" + SESSION + "&j=" + TRAIN,
                     "files": [] if self.missing_ply else [{"name": "gaussians.ply", "bytes": 100, "url": "/test.ply"}]}
         if name in {"creative_cancel_job", "webscan_cancel_reconstruction"}:
-            return {"status": "cancelled"}
+            if self.cancel_ack == "wrong_id":
+                return {"id": "f" * 32, "status": "cancelled"}
+            if self.cancel_ack == "running":
+                return {"id": args["job_id"], "status": "running"}
+            return {"id": args["job_id"], "status": "cancelled"}
         raise AssertionError(name)
 
 
@@ -178,6 +183,23 @@ async def test_lost_mutation_response_is_looked_up_and_cancelled_not_replayed(ri
     assert (await complete(workflow))["status"] == "FAILED"
     assert tools.calls["creative_generate_reference"] == tools.calls["creative_cancel_job"] == 1
     assert tools.calls["creative_get_request"] == 1
+
+
+@pytest.mark.parametrize("ack", ["wrong_id", "running"])
+async def test_invalid_cancel_ack_keeps_job_unconfirmed(rig, ack):
+    workflow, store, tools, _ = rig
+    tools.cancel_ack = ack
+    tools.lose_response = True
+    assert (await complete(workflow))["status"] == "CANCELLING"
+    assert store.get(workflow.store.by_request("test")["id"])["status"] == "CANCELLING"
+
+
+async def test_missing_child_is_not_treated_as_confirmed_cleanup(rig):
+    workflow, store, tools, _ = rig
+    job, _ = store.create("一个花瓶", "THREE_D", None, "missing-child")
+    store.update(job["id"], referenceRequest=job["id"] + ":reference")
+    assert await workflow.cleanup(job["id"]) is False
+    assert tools.calls["creative_cancel_job"] == 0
 
 
 @pytest.mark.parametrize("read", ["creative_get_job", "webscan_get_status", "webscan_get_result"])
