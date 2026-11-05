@@ -373,21 +373,27 @@ web-scan 尚未提供原生请求幂等键，不能将“唯一采集与参数�
 
 ### 问题与实现
 
-本轮开始时工作区干净，`codex/local-graphics-agent` 与用户远程分支仍在 `ad11747`，没有活动生成任务。复核取消路径发现，Agent 的清理逻辑只要请求查询返回非空任务就调用取消工具，却忽略工具返回值；空查询、错误任务 ID 或 `queued/running` 状态也可能被当成成功清理，随后错误地把主任务置为 `CANCELLED` 或 `FAILED`。这会掩盖下游仍在运行或回执串任务的情况。
+本轮开始时工作区干净，无适用的 AGENTS.md，`codex/local-graphics-agent` 与用户远程 main、工作分支均为 `ad11747`，对应两条 CI 成功。复核取消路径发现，Agent 的清理逻辑只要请求查询返回非空任务就调用取消工具，却忽略工具返回值；空查询、错误任务 ID 或 `queued/running` 状态也可能被当成成功清理，随后错误地把主任务置为 `CANCELLED` 或 `FAILED`。这会掩盖下游仍在运行或回执串任务的情况。
 
-- Web-scan MCP 的取消适配器现在核对回执 ID 必须等于请求 ID，并只接受 `cancelled/failed/succeeded`。本地服务在取消与完成竞态下返回已完成状态仍可确认“没有继续运行”，未知状态或错 ID 会报错。
-- Agent 清理层对两个取消 MCP 都重复校验 ID 和终态，并要求查询结果确实包含下游任务；空结果保持 `CANCELLING`，等待恢复服务后再次确认。`queued/running`、缺少字段、错 ID 和未知状态均不会伪造终态。
+- Web-scan MCP 的取消适配器现在核对回执 ID 必须等于请求 ID，并只接受 `cancelled/failed/succeeded`。本地服务在取消与完成竞态下返回已完成状态仍可确认后续任务步骤结束；未知状态或错 ID 会报错。
+- Agent 清理层对两个取消 MCP 都重复校验 ID 和各自的终态（Creative 还包括 `needs_review`），并要求查询结果确实包含下游任务；空结果保持 `CANCELLING`，等待恢复服务后再次确认。`queued/running`、缺少字段、错 ID、畸形及未知状态均不会伪造终态。
 - 测试替身改为遵循真实 `{id,status}` 合同，新增错误回执、缺失下游和 web-scan 适配器回执校验用例；没有引入重试、重复提交或新的模型调用。
 
 ### 来源与取舍
 
-检索与阅读日期：2026-11-05。MCP [2025-11-25 取消规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation)说明取消通知可能与完成响应竞态，未知、已完成或不可取消的请求可以被忽略，发送方应处理迟到响应；因此本项目把“用户已请求取消”和“下游已确认不再运行”分开，终态回执仍需匹配任务 ID。相关的 [RetryBench v4](https://arxiv.org/abs/2610.15884) 于 2026-11-04 修订，强调超时/不确定观察不能自动授予再次执行副作用操作的权限；本轮只加强回执门槛，没有增加取消重试或重放提交。
+检索与阅读日期：2026-11-05；不将基础规范或已有版本称为当天新能力。
+
+- MCP [2025-11-25 取消规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation)说明取消通知存在完成竞态，也可能被接收方忽略。本项目使用应用层取消工具，回执校验是依据自有工具合同增加的检查，没有把它称为 `notifications/cancelled` 的确认机制或原生 `tasks/cancel`。
+- 阅读 [MCP Python SDK PR #3625 的示例和测试](https://github.com/modelcontextprotocol/python-sdk/pull/3625/files)，2026-10-02 合并，收录于同日发布、检索时仍为最新的 [v2.3.0](https://github.com/modelcontextprotocol/python-sdk/releases/tag/v2.3.0)。其中同步工具线程及 stateless HTTP 的取消测试表明，停止等待不保证服务端工作中止；这与本项目 stateless MCP 和后台 Creative worker 的边界相关。只借鉴区分取消意图与执行结果的原则，继续使用现有 1.x SDK，不为本修复升级框架。
+- [RetryBench](https://arxiv.org/abs/2610.15884) 首次提交 2026-10-11，v4 修订于 2026-11-04。阅读正文引言及协议：同一空查询可以对应未执行、仍在运行、已执行但未可见，缺少权威排除证据时不能据此确认不存在副作用。其结论来自四项合成任务及限定提示实验，不能证明本地服务的实际停止或 exactly-once；本轮只据此保留不重放边界并加强回执门槛。
 
 ### 验证与边界
 
-- `.venv/bin/python -m pytest -q`：226 项 Python 测试通过；`node --test tests/*.test.mjs`：11 项通过；前端 `node --check agent/text2splat/static/graphics/studio.js`、`pip check` 和 `git diff --check` 通过。
-- 新测试覆盖错 ID、仍在运行、缺失子任务、web-scan 错 ID/非终态回执；均保持 `CANCELLING` 或抛出明确回执错误。测试使用临时数据库和 HTTP/MCP 替身，没有调用真实模型、生图或 COLMAP/Brush，也没有消耗用户 token。
-- 取消请求到达供应商后的物理停止仍取决于本地 web-scan/图片服务合同；如果服务不可用，任务会继续显示 `CANCELLING`，不会虚报已停止。真实 3D 重建质量仍未在本轮验收。
+- 在 `ad11747` 的旧生产实现上运行新故障用例，21 项按预期失败，复现忽略异常回执、空查询及适配器未校验的问题；恢复修复实现后验证通过。
+- `.venv/bin/python -m pytest -q`：260 项 Python 测试通过；`node --test tests/*.test.mjs`：11 项通过；前端脚本语法、`pip check` 和 `git diff --check` 通过。
+- 覆盖异常回执与空查询、三种子任务的各自终态、取消与完成竞态，以及异常回执修正后用户再次取消。恢复过程中参考图提交仍只有一次，没有启动多视角或训练；单次取消工具调用没有自动重试。测试使用临时数据库和明确的 HTTP/工具替身，没有调用真实模型、生图或 COLMAP/Brush，也没有消耗用户 token。
+- 本机只读检查确认 4 个旧生成任务均为 FAILED，Creative 没有 queued/running 作业，聊天仍使用 GLM-5.3-Flash。真实 3D 重建质量未在本轮验收。
+- 终态回执只确认服务阻止后续任务步骤，不能保证线程、子进程或供应商在途调用已物理退出；Creative 的现有消息继续说明该限制。对已保存提交意图的空查询继续保留歧义，即使实际未受理也可能需要人工核实；不会为了消除 `CANCELLING` 而重发任务。
 
 ### 后续
 

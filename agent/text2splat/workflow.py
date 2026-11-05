@@ -484,10 +484,12 @@ class Workflow:
                 )
                 if not isinstance(cancelled, dict) or cancelled.get("id") != child:
                     raise ToolFailure("取消回执的任务标识不匹配")
-                # A terminal success/failure/review state means the provider
-                # is no longer running. Queued/running (or an unknown value)
-                # is not proof that cancellation completed.
-                if cancelled.get("status") not in {"cancelled", "failed", "succeeded", "needs_review"}:
+                # Terminal receipts confirm no further job steps, including
+                # completion races. They cannot recall an in-flight API call.
+                terminal = {"cancelled", "failed", "succeeded"} if train else {
+                    "cancelled", "failed", "succeeded", "needs_review"}
+                status = cancelled.get("status")
+                if not isinstance(status, str) or status not in terminal:
                     raise ToolFailure("取消回执状态无效")
             except Exception:
                 complete = False
