@@ -141,9 +141,10 @@ class Webscan:
         # job or an unrecognised state by accident.
         if not isinstance(data, dict) or data.get("id") != requested:
             raise ValueError("web-scan 取消回执的任务标识不匹配")
-        if data.get("status") not in {"cancelled", "failed", "succeeded"}:
+        status = data.get("status")
+        if not isinstance(status, str) or status not in {"cancelled", "failed", "succeeded"}:
             raise ValueError("web-scan 取消回执状态无效")
-        return {"id": requested, "status": data["status"]}
+        return {"id": requested, "status": status}
 
     def result(self, job_id):
         status = self.status(job_id)

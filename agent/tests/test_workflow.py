@@ -54,7 +54,6 @@ class FakeTools:
         self.fail_training = False
         self.missing_ply = False
         self.block = False
-        self.cancel_ack = "valid"
         self.entered, self.release = asyncio.Event(), asyncio.Event()
 
     async def call(self, name, args):
@@ -93,10 +92,6 @@ class FakeTools:
             return {"viewer_url": "http://127.0.0.1:8787/?p=" + SESSION + "&j=" + TRAIN,
                     "files": [] if self.missing_ply else [{"name": "gaussians.ply", "bytes": 100, "url": "/test.ply"}]}
         if name in {"creative_cancel_job", "webscan_cancel_reconstruction"}:
-            if self.cancel_ack == "wrong_id":
-                return {"id": "f" * 32, "status": "cancelled"}
-            if self.cancel_ack == "running":
-                return {"id": args["job_id"], "status": "running"}
             return {"id": args["job_id"], "status": "cancelled"}
         raise AssertionError(name)
 
@@ -185,20 +180,58 @@ async def test_lost_mutation_response_is_looked_up_and_cancelled_not_replayed(ri
     assert tools.calls["creative_get_request"] == 1
 
 
-@pytest.mark.parametrize("ack", ["wrong_id", "running"])
-async def test_invalid_cancel_ack_keeps_job_unconfirmed(rig, ack):
+@pytest.mark.parametrize("ack", [None, {}, [], {"status": "cancelled"},
+    {"id": "f" * 32, "status": "cancelled"}, {"id": REF, "status": "running"},
+    {"id": REF, "status": "queued"}, {"id": REF, "status": "unknown"},
+    {"id": REF, "status": []}])
+async def test_invalid_cancel_ack_keeps_job_unconfirmed_and_can_recover(rig, monkeypatch, ack):
     workflow, store, tools, _ = rig
-    tools.cancel_ack = ack
+    original = tools.call
+
+    async def faulty_cancel(name, args):
+        actual = await original(name, args)
+        return ack if name == "creative_cancel_job" else actual
+
+    monkeypatch.setattr(tools, "call", faulty_cancel)
     tools.lose_response = True
-    assert (await complete(workflow))["status"] == "CANCELLING"
-    assert store.get(workflow.store.by_request("test")["id"])["status"] == "CANCELLING"
+    job = await complete(workflow)
+    assert job["status"] == "CANCELLING" and job["cleanupConfirmed"] is False
+    assert tools.calls["creative_get_request"] == tools.calls["creative_cancel_job"] == 1
+    monkeypatch.setattr(tools, "call", original)
+    workflow.cancel(job["id"])
+    await asyncio.wait_for(workflow.queue.join(), 2)
+    assert store.get(job["id"])["status"] == "CANCELLED"
+    assert tools.calls["creative_generate_reference"] == 1
+    assert not tools.calls["creative_generate_multiview"] and not tools.calls["webscan_start_reconstruction"]
+
+
+@pytest.mark.parametrize("field,child", [("referenceRequest", REF), ("viewsRequest", VIEWS), ("trainRequest", TRAIN)])
+@pytest.mark.parametrize("status", ["cancelled", "succeeded", "failed", "needs_review", "running"])
+async def test_cancellation_checks_each_downstream_terminal_contract(rig, monkeypatch, field, child, status):
+    workflow, store, tools, _ = rig
+    job, _ = store.create("一个花瓶", "THREE_D", None, "cancel-receipt")
+    request = job["id"] + ":receipt"
+    store.update(job["id"], **{field: request}, cancelRequested=True, status="CANCELLING")
+    tools.requests[request] = {"job_id" if field == "trainRequest" else "id": child}
+    original = tools.call
+
+    async def receipt(name, args):
+        actual = await original(name, args)
+        return {"id": child, "status": status} if name.endswith(("_cancel_job", "_cancel_reconstruction")) else actual
+
+    monkeypatch.setattr(tools, "call", receipt)
+    await workflow.finish_cancel(job["id"])
+    confirmed = status in {"cancelled", "succeeded", "failed"} or (status == "needs_review" and field != "trainRequest")
+    assert store.get(job["id"])["status"] == ("CANCELLED" if confirmed else "CANCELLING")
+    assert sum(tools.calls.values()) == 2
 
 
 async def test_missing_child_is_not_treated_as_confirmed_cleanup(rig):
     workflow, store, tools, _ = rig
     job, _ = store.create("一个花瓶", "THREE_D", None, "missing-child")
     store.update(job["id"], referenceRequest=job["id"] + ":reference")
-    assert await workflow.cleanup(job["id"]) is False
+    await workflow.finish_cancel(job["id"])
+    assert store.get(job["id"])["status"] == "CANCELLING"
     assert tools.calls["creative_cancel_job"] == 0
 
 
