@@ -97,8 +97,11 @@ async def test_long_design_context_compresses_and_still_finishes_once(rig):
 
     tools = DetailedTools()
     workflow.tools = tools
+    workflow.memory.set_preference("glaze", "哑光青瓷")
     job = await complete(workflow)
     assert job["status"] == "READY" and job["contextStats"]["compressed"] is True
     assert job["contextStats"]["afterCharacters"] <= 12000 < job["contextStats"]["beforeCharacters"]
     assert job["agentRounds"] == 6
+    assert job["memorySources"] == job["contextStats"]["memorySourceIds"] == ["pref:glaze"]
+    assert "哑光青瓷" in workflow.model.history[-1][1].content
     assert tools.calls["creative_generate_reference"] == tools.calls["webscan_start_reconstruction"] == 1
