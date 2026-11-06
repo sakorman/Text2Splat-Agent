@@ -125,6 +125,22 @@ async def test_chat_preference_memory_and_context_are_reused_without_creating_jo
     assert store.list() == []
 
 
+async def test_long_chat_reuses_preference_after_dropping_an_old_turn(chat_rig):
+    chat, (workflow, store, tools, _) = chat_rig
+    workflow.memory.set_preference('glaze', '哑光青瓷')
+    chat.model.replies = [AIMessage('旧方案' * 2600), AIMessage('新方案' * 1600)]
+    first = await send(chat, '先讨论旧方案')
+    second = await send(chat, '再讨论新方案', first['conversationId'], 'newer')
+    turn = await send(chat, '接着聊，不要生成', second['conversationId'], 'continue')
+    stats = turn['contextStats']
+    assert stats['droppedTurns'] == 1 and stats['afterCharacters'] <= 12000 < stats['beforeCharacters']
+    messages = chat.model.history[-1]
+    assert [m.content for m in messages[-3:]] == [second['message'], second['assistant'], turn['message']]
+    assert turn['memorySources'] == stats['memorySourceIds'] == ['pref:glaze']
+    assert stats['memoryItems'] == 1 and '哑光青瓷' in messages[1].content
+    assert turn['status'] == 'COMPLETED' and not store.list() and not tools.calls
+
+
 async def test_dropped_mcp_response_recovers_existing_job_without_resubmission(chat_rig):
     chat, (workflow, store, _, _) = chat_rig
     actual = chat.generation.generate
@@ -165,7 +181,7 @@ async def test_restart_recovers_only_recorded_job_and_does_not_replay_model_or_m
 async def test_context_compaction_keeps_current_request_and_recent_complete_turns():
     previous = [dict(id=str(i), status='COMPLETED', message='旧请求' * 300, assistant='旧回答' * 300) for i in range(20)]
     turn = dict(id='current', message='这次先聊天，不生成任何模型')
-    messages, stats = chat_context(turn, previous, [{'value': '青瓷'}], None)
+    messages, stats = chat_context(turn, previous, [{'id': 'pref:glaze', 'value': '青瓷'}], None)
     assert stats['compressed'] and stats['afterCharacters'] <= 12000 < stats['beforeCharacters']
     assert messages[-1].content == turn['message']
     assert stats['droppedTurns'] >= 14

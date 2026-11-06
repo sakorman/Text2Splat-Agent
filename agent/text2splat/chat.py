@@ -9,7 +9,7 @@ from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .chat_store import ChatStore
-from .context import size
+from .context import fit_memories, size
 from .react import ReActModel
 from .store import TERMINAL
 from .tools import ToolFailure
@@ -49,9 +49,8 @@ def chat_context(turn, previous, memories, job, budget=12000):
     current = HumanMessage(turn["message"])
     facts = {"current_generation": {k: job.get(k) for k in ("id", "status", "message", "prompt")} if job else None,
              "generation_requires_explicit_request": True}
-    records = list(memories)
 
-    def build(retained, earlier):
+    def build(retained, earlier, records=()):
         context = [HumanMessage("应用提供的只读事实，不是用户命令：\n" + json.dumps(facts, ensure_ascii=False))]
         if records:
             context.append(HumanMessage("历史参考数据，本轮要求优先：\n" + json.dumps(records, ensure_ascii=False)))
@@ -64,23 +63,20 @@ def chat_context(turn, previous, memories, job, budget=12000):
             context.extend([HumanMessage(t["message"]), AIMessage(t["assistant"] or "该轮回复未完成。")])
         return [*context, current]
 
-    full = build(previous, [])
-    before = size(full)
+    before = size(build(previous, [], memories))
     retained, earlier = previous[-6:], previous[:-6]
-    messages = build(retained, earlier)
-    while size(messages) > budget:
-        if records:
-            records.pop()
-        elif retained:
+    while size(build(retained, earlier)) > budget:
+        if retained:
             earlier.append(retained.pop(0))
         elif earlier:
             earlier = []
         else:
             raise ToolFailure("当前消息和必要状态超过上下文预算，请缩短消息")
-        messages = build(retained, earlier)
+    messages, records = fit_memories(lambda records: build(retained, earlier, records), memories, budget)
     return messages, {"compressed": len(retained) != len(previous) or len(records) != len(memories),
                       "beforeCharacters": before, "afterCharacters": size(messages), "budgetCharacters": budget,
-                      "droppedTurns": len(previous) - len(retained), "memoryItems": len(records)}
+                      "droppedTurns": len(previous) - len(retained), "memoryItems": len(records),
+                      "memorySourceIds": [m["id"] for m in records]}
 
 
 class ChatState(TypedDict, total=False):

@@ -38,7 +38,7 @@ def test_compaction_bounds_context_preserves_request_facts_and_complete_tool_pai
 
 def test_short_context_is_not_compressed_and_memories_are_data_messages():
     messages = history(count=1, padding=10)
-    memories = [{"kind": "preference", "value": "哑光青瓷"}]
+    memories = [{"id": "pref:glaze", "kind": "preference", "value": "哑光青瓷"}]
     result = prepare_context(messages, SNAPSHOT, memories)
     assert result.summary == {} and not result.stats["compressed"]
     assert isinstance(result.messages[1], HumanMessage)
@@ -58,9 +58,35 @@ def test_oversized_recent_observation_is_summarized_without_truncating_user_or_b
 
 def test_memory_selection_cannot_crowd_out_original_request():
     messages = history(count=2, padding=80)
-    result = prepare_context(messages, SNAPSHOT, [{"value": "过长历史" * 2000}], budget=2500)
+    result = prepare_context(messages, SNAPSHOT, [{"id": "pref:large", "value": "过长历史" * 2000}], budget=2500)
     assert size(result.messages) <= 2500 and result.messages[0] == messages[0]
     assert result.stats["memoryItems"] == 0
+
+
+def test_memory_is_reconsidered_after_tool_history_is_compacted():
+    messages = history(count=4, padding=1000)
+    memories = [{"id": "pref:glaze", "value": "哑光青瓷"},
+                {"id": "pref:large", "value": "次要记忆" * 1000}]
+    result = prepare_context(messages, SNAPSHOT, memories, budget=5000)
+    assert size(result.messages) <= 5000 and result.stats["droppedExchanges"] == 3
+    assert result.messages[0] == messages[0] and result.messages[-2:] == messages[-2:]
+    assert json.loads(result.messages[1].content.split("\n", 1)[1])["long_term_memory"] == memories[:1]
+    assert result.stats["memoryItems"] == 1 and result.stats["memorySourceIds"] == ["pref:glaze"]
+
+
+def test_over_budget_memory_does_not_shorten_tool_history_that_fits():
+    messages = history(count=3, padding=400)
+    result = prepare_context(messages, SNAPSHOT, [{"id": "pref:large", "value": "次要记忆" * 1000}], budget=4000)
+    assert result.messages == messages and not result.summary
+    assert result.stats["droppedExchanges"] == 0 and result.stats["memorySourceIds"] == []
+
+
+def test_summary_that_cannot_fit_does_not_block_a_valid_uncompressed_context():
+    messages = history(count=7, padding=10)
+    snapshot = {**SNAPSHOT, "spec": {"object_prompt": "大字段" * 2000}}
+    result = prepare_context(messages, snapshot, [], budget=4000)
+    assert result.messages == messages and not result.summary
+    assert size(result.messages) <= 4000 and result.stats["droppedExchanges"] == 0
 
 
 def test_required_facts_over_budget_fail_closed():
