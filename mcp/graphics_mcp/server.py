@@ -82,7 +82,7 @@ def create_server(kind, settings, port):
 
         @tool
         def webscan_get_status(job_id: str) -> dict:
-            """Read actual reconstruction phase, status, progress and report."""
+            """Read reconstruction progress with the matching job ID and its session ID."""
             return scan.status(job_id)
 
         @tool
@@ -92,7 +92,7 @@ def create_server(kind, settings, port):
 
         @tool
         def webscan_get_result(job_id: str) -> dict:
-            """Return viewer/artifact links only after real reconstruction succeeds."""
+            """Return job/session IDs and artifact links after matching reconstruction succeeds."""
             return scan.result(job_id)
 
         @tool

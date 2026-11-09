@@ -355,7 +355,8 @@ def test_webscan_http_contract_and_artifact_gate(setup):
         if path == f"/api/jobs/{jid}":
             return httpx.Response(200, json={"id": jid, "session_id": sid, "status": "succeeded"})
         if path.endswith("/artifacts"):
-            return httpx.Response(200, json={"files": [{"name": "gaussians.ply", "bytes": 100}] if has_ply else []})
+            return httpx.Response(200, json={"job_id": jid,
+                "files": [{"name": "gaussians.ply", "bytes": 100}] if has_ply else []})
         raise AssertionError(path)
 
     scan = Webscan(settings, store, httpx.Client(base_url=settings.webscan_url, transport=httpx.MockTransport(respond)))
@@ -376,6 +377,7 @@ def test_webscan_http_contract_and_artifact_gate(setup):
         scan.result(jid)
     has_ply = True
     result = scan.result(jid)
+    assert result["job_id"] == jid and result["session_id"] == sid
     assert result["viewer_url"].endswith(f"?p={sid}&j={jid}")
     assert result["files"][0]["name"] == "gaussians.ply"
 

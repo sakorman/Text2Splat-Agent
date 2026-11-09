@@ -75,15 +75,15 @@ Creative 与 Web-scan 两个服务只监听 loopback，使用 `/mcp` Streamable 
 | `creative_health` | 无 | 模型、配置状态，不返回密钥 |
 | `creative_generate_reference` | `prompt`, `request_id` | 立即返回生图任务 ID |
 | `creative_generate_multiview` | `reference_id`, `request_id` | 立即返回多视图任务 ID |
-| `creative_get_job` | `job_id` | 状态、资产 URL、设计与检查结果 |
+| `creative_get_job` | `job_id` | `id`、状态、设计与检查结果；成功时图片集合 `asset_set_id=id` |
 | `creative_get_request` | `request_id` | 从幂等记录恢复任务 ID，不重新生成 |
 | `creative_cancel_job` | `job_id` | 停止后续生成步骤 |
 | `webscan_health` | 无 | 本机服务与 Brush 可用性 |
 | `webscan_import_generated_views` | `asset_set_id` | 已冻结的 `session_id` |
 | `webscan_start_reconstruction` | `session_id`, `request_id` | `job_id` |
-| `webscan_get_status` | `job_id` | 真实阶段、进度和报告 |
+| `webscan_get_status` | `job_id` | `id`、`session_id`、真实阶段、进度和报告 |
 | `webscan_get_request` | `request_id` | 恢复可能丢失响应的训练任务 ID |
-| `webscan_get_result` | `job_id` | 有效 Gaussian PLY、viewer 与其他产物链接 |
+| `webscan_get_result` | `job_id` | `job_id`、`session_id`、有效 Gaussian PLY、viewer 与其他产物链接 |
 | `webscan_cancel_reconstruction` | `job_id` | 下游取消状态 |
 
 ## 免费路径与可选生图路径
@@ -106,6 +106,7 @@ Creative 与 Web-scan 两个服务只监听 loopback，使用 `/mcp` Streamable 
 - 生成提交前写入请求标识。响应丢失时按标识查询并清理遗留任务，不重新请求图片。
 - Agent 任务文件原子替换并兼容旧 Java JSON；LangGraph 节点状态写入独立 SQLite 检查点；MCP SQLite WAL 记录幂等映射。每个服务使用进程文件锁避免重复启动。
 - 下游导入按资产集合复用采集；web-scan 本身进一步去重。训练启动前保存采集 ID 与完整预设；已有启动意图的同一请求只做查询，不重发训练 POST。响应丢失时必须唯一匹配采集与参数，确认后持久化任务 ID；零个或多个匹配均保留未知状态，不能取列表首项作为取消目标。启动响应自身也核对采集与参数，发现其他参数的活动任务时不发送新训练请求。旧意图按此前固定预设兼容查询。
+- 生图进度的 `id` 必须等于所查询的子任务 ID，成功时 `asset_set_id` 也必须相等。重建进度和最终结果同时匹配已保存的训练、采集 ID；Web-scan MCP 还独立校验 HTTP 状态响应与产物清单的任务 ID。字段缺失、无效或串任务时在写入进度、展示产物或记录成功记忆之前失败，不重试、不采用返回的其他任务。这是结果归属检查，不替代几何或文件内容验收。
 - 取消优先于晚到的成功结果。已发送的外部模型请求不能撤回，重建取消交给 web-scan 终止进程组。
 - 浏览器只接收属于当前任务、且与原请求任务 ID 相符的异步更新。终态保持不变，`CANCELLING` 不被旧的运行进度覆盖；取消请求的等待状态按任务 ID 记录。旧请求返回或失败不能污染新任务的界面，旧请求的结束处理也不能提前启用新任务仍在等待的取消按钮。
 - 服务重启不自动生成新图片或续训；中断任务被标记并清理。旧图片和报告保留用于判断问题。
