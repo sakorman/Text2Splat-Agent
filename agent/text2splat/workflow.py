@@ -394,6 +394,8 @@ class Workflow:
     async def wait_creative(self, state, child, views):
         while True:
             result = await self.read(state, "creative_get_job", {"job_id": child})
+            if result.get("id") != child or (result.get("status") == "succeeded" and result.get("asset_set_id") != child):
+                raise ToolFailure("生图进度或图片集合的任务标识不匹配，未采用该结果")
             phase = result.get("stage", "")
             fields = dict(stage=phase, message=result.get("message", ""),
                           status="MULTIVIEW" if views else "PLANNING" if phase == "planning" else "REFERENCE")
@@ -443,6 +445,8 @@ class Workflow:
     async def wait_reconstruction(self, state):
         while True:
             result = await self.read(state, "webscan_get_status", {"job_id": state["reconstruction_id"]})
+            if result.get("id") != state["reconstruction_id"] or result.get("session_id") != state["session_id"]:
+                raise ToolFailure("重建进度的任务或采集标识不匹配，未采用该结果")
             self.store.update(state["job_id"], stage=result.get("stage", ""), message=result.get("message", ""), reconstruction=result)
             status = result.get("status")
             if status == "succeeded":
@@ -458,6 +462,8 @@ class Workflow:
     async def validate_result(self, state):
         self.stage(state, "VALIDATING", "export", "正在检查 3D 产物")
         result = await self.read(state, "webscan_get_result", {"job_id": state["reconstruction_id"]})
+        if result.get("job_id") != state["reconstruction_id"] or result.get("session_id") != state["session_id"]:
+            raise ToolFailure("重建产物的任务或采集标识不匹配，未采用该结果")
         if not any(isinstance(f, dict) and f.get("name") == "gaussians.ply" and f.get("url")
                    and isinstance(f.get("bytes"), (int, float)) and f["bytes"] > 0 for f in result.get("files", [])):
             raise ToolFailure("缺少有效的 Gaussian PLY 产物")

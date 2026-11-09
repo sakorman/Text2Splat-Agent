@@ -114,7 +114,14 @@ class Webscan:
         return None
 
     def status(self, job_id):
-        data = self.request("GET", "/api/jobs/" + valid_id(job_id))
+        requested = valid_id(job_id)
+        data = self.request("GET", "/api/jobs/" + requested)
+        if not isinstance(data, dict) or data.get("id") != requested:
+            raise ValueError("重建进度的任务标识不匹配")
+        session_id = data.get("session_id")
+        if not isinstance(session_id, str):
+            raise ValueError("重建进度缺少有效的采集标识")
+        valid_id(session_id)
         return {key: data.get(key) for key in ("id", "session_id", "status", "stage", "progress", "message", "report")}
 
     def by_request(self, request_id):
@@ -150,11 +157,17 @@ class Webscan:
         status = self.status(job_id)
         if status["status"] != "succeeded":
             raise ValueError("真实重建尚未成功，没有可展示的 3D 成品")
-        listed = self.request("GET", f"/api/jobs/{job_id}/artifacts")["files"]
+        manifest = self.request("GET", f"/api/jobs/{job_id}/artifacts")
+        if not isinstance(manifest, dict) or manifest.get("job_id") != job_id:
+            raise ValueError("重建产物清单的任务标识不匹配")
+        listed = manifest.get("files")
+        if not isinstance(listed, list):
+            raise ValueError("重建产物清单格式无效")
         files = [{"name": f["name"], "bytes": f["bytes"],
                   "url": f"{self.url}/api/jobs/{job_id}/artifacts/{f['name']}?download=true"}
                  for f in listed if f["name"] in {"gaussians.ply", "preview.splat", "report.json", "cameras.json"} and f["bytes"] > 0]
         if not any(f["name"] == "gaussians.ply" for f in files):
             raise ValueError("任务报告成功，但缺少有效的 Gaussian PLY 产物")
-        return {"viewer_url": f"{self.url}/?p={valid_id(status['session_id'])}&j={job_id}",
+        return {"job_id": job_id, "session_id": status["session_id"],
+                "viewer_url": f"{self.url}/?p={status['session_id']}&j={job_id}",
                 "files": files, "report": status.get("report"), "backend": "brush"}

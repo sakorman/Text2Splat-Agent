@@ -81,15 +81,17 @@ class FakeTools:
                 self.entered.set()
                 await self.release.wait()
             multi = args["job_id"] == VIEWS
-            return {"status": "needs_review" if multi and self.reject_views else "succeeded",
+            return {"id": args["job_id"], "status": "needs_review" if multi and self.reject_views else "succeeded",
                     "stage": "review" if multi else "reference", "asset_set_id": VIEWS if multi else REF,
                     "assets": [{"url": "/api/graphics/assets/" + REF + "/00.png"}], "spec": {"title": "测试花瓶"}}
         if name == "webscan_import_generated_views":
             return {"session_id": SESSION}
         if name == "webscan_get_status":
-            return {"status": "failed" if self.fail_training else "succeeded", "stage": "sfm", "message": "测试状态"}
+            return {"id": TRAIN, "session_id": SESSION,
+                    "status": "failed" if self.fail_training else "succeeded", "stage": "sfm", "message": "测试状态"}
         if name == "webscan_get_result":
-            return {"viewer_url": "http://127.0.0.1:8787/?p=" + SESSION + "&j=" + TRAIN,
+            return {"job_id": TRAIN, "session_id": SESSION,
+                    "viewer_url": "http://127.0.0.1:8787/?p=" + SESSION + "&j=" + TRAIN,
                     "files": [] if self.missing_ply else [{"name": "gaussians.ply", "bytes": 100, "url": "/test.ply"}]}
         if name in {"creative_cancel_job", "webscan_cancel_reconstruction"}:
             return {"id": args["job_id"], "status": "cancelled"}
@@ -132,6 +134,40 @@ async def test_concept_does_not_enter_3d_nodes(rig):
     workflow, _, tools, _ = rig
     assert (await complete(workflow, "CONCEPT"))["status"] == "CONCEPT_READY"
     assert not tools.calls["creative_generate_multiview"] and not tools.calls["webscan_health"]
+
+
+@pytest.mark.parametrize("tool,field,blocked", [
+    ("creative_get_job", "id", "creative_generate_multiview"),
+    ("creative_get_job", "asset_set_id", "creative_generate_multiview"),
+    ("webscan_get_status", "id", "webscan_get_result"),
+    ("webscan_get_status", "session_id", "webscan_get_result"),
+    ("webscan_get_result", "job_id", None),
+    ("webscan_get_result", "session_id", None),
+])
+@pytest.mark.parametrize("value", ["e" * 32, None])
+async def test_foreign_or_missing_read_identity_cannot_complete_current_task(rig, monkeypatch, tool, field, blocked, value):
+    workflow, _, tools, saver = rig
+    original = tools.call
+
+    async def swapped(name, args):
+        result = await original(name, args)
+        if name == tool:
+            result[field] = value
+            if name == "creative_get_job":
+                result["spec"] = {"title": "foreign-object-marker"}
+        return result
+
+    monkeypatch.setattr(tools, "call", swapped)
+    job = await complete(workflow)
+    assert job["status"] == "FAILED" and "result" not in job
+    assert "foreign-object-marker" not in json.dumps(job)
+    assert "不匹配" in job["message"]
+    assert tools.calls[tool] == 1 and tools.calls["creative_generate_reference"] == 1
+    if blocked:
+        assert not tools.calls[blocked]
+    checkpoint = await saver.aget_tuple({"configurable": {"thread_id": job["id"]}})
+    assert not checkpoint.checkpoint["channel_values"].get("verified_result")
+    assert not any(m.get("artifact_verified") for m in workflow.memory.list())
 
 
 async def test_idempotency_conflict_and_terminal_immutability(rig):
