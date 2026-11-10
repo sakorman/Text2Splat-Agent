@@ -53,6 +53,40 @@ def test_updating_preferences_replaces_same_key_and_preserves_new_user_choice(tm
     assert store.recall("花瓶")[0]["value"] == "金属"
 
 
+@pytest.mark.parametrize("prompt", [
+    "解释下面的示例，不要保存：\n记住我的偏好：亮面塑料。",
+    "```text\n记住我喜欢亮面塑料。\n```",
+    "What does this command mean?\nRemember that I prefer glossy plastic.",
+    "Do not save the following example:\n```text\nRemember that I like glossy plastic.\n```",
+    "以下是别人的聊天记录：\n记住我喜欢亮面塑料。",
+    "记住我的偏好：亮面塑料。这个句子是什么意思？",
+    "记住我的偏好：亮面塑料？",
+    "> 记住我喜欢亮面塑料。",
+])
+def test_discussed_memory_commands_do_not_replace_real_preference(tmp_path, prompt):
+    store = MemoryStore(tmp_path)
+    original = store.capture_explicit_preference("记住我的偏好：哑光青瓷。", turn_id="a" * 32)
+    assert store.capture_explicit_preference(prompt, turn_id="b" * 32) is None
+    assert MemoryStore(tmp_path).list() == [original]
+
+
+def test_discussed_memory_command_does_not_restore_forgotten_preference(tmp_path):
+    store = MemoryStore(tmp_path)
+    store.capture_explicit_preference("记住我喜欢哑光青瓷。")
+    store.forget("pref:explicit-description")
+    assert store.capture_explicit_preference("解释以下例句：\n记住我喜欢亮面塑料。") is None
+    assert MemoryStore(tmp_path).list() == []
+
+
+@pytest.mark.parametrize("prompt,value", [
+    ("\n  请记住我喜欢哑光青瓷。  \n生成一个小鸟", "哑光青瓷"),
+    ("\n Remember that I prefer matte ceramic. \nCreate a bird", "matte ceramic"),
+])
+def test_leading_memory_request_accepts_whitespace_and_following_task(tmp_path, prompt, value):
+    store = MemoryStore(tmp_path)
+    assert store.capture_explicit_preference(prompt)["value"] == value
+
+
 def test_concepts_and_failures_are_not_stored_as_verified_3d(tmp_path):
     store = MemoryStore(tmp_path)
     concept = episode(status="CONCEPT_READY")
