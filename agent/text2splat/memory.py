@@ -72,11 +72,15 @@ class MemoryStore:
         return item
 
     def capture_explicit_preference(self, prompt, job_id=None, *, turn_id=None):
-        # Only a standalone explicit remember request. Object adjectives are not a user profile.
-        patterns = [r"(?:^|\n)\s*(?:请)?记住(?:我的偏好[：:]\s*|我(?:喜欢|偏好)\s*)([^\n。！？!?]{2,200})(?=[\n。！？!?]|$)",
-                    r"(?:^|\n)\s*remember (?:that )?I (?:prefer|like) ([^\n.!?]{2,200})(?=[\n.!?]|$)"]
+        # Auto-capture only a complete leading request. Later lines may be quoted
+        # examples or code, even when they contain a syntactically valid command.
+        lines = prompt.strip().splitlines()
+        if not lines:
+            return None
+        patterns = [r"(?:请)?记住(?:我的偏好[：:]\s*|我(?:喜欢|偏好)\s*)([^。！？.!?]{2,200})[。！.!]?",
+                    r"remember (?:that )?I (?:prefer|like) ([^。！？.!?]{2,200})[。！.!]?"]
         for pattern in patterns:
-            match = re.search(pattern, prompt, re.IGNORECASE)
+            match = re.fullmatch(pattern, lines[0].strip(), re.IGNORECASE)
             if match and len(match[1].strip()) >= 2:
                 return self.set_preference("explicit-description", match[1], source_job_id=job_id,
                                            source_turn_id=turn_id, evidence=match[0].strip())

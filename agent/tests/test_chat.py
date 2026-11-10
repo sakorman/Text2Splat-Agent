@@ -125,6 +125,28 @@ async def test_chat_preference_memory_and_context_are_reused_without_creating_jo
     assert store.list() == []
 
 
+@pytest.mark.parametrize('message', [
+    '请解释下面的示例，不要保存：\n记住我的偏好：亮面塑料。',
+    '```text\n记住我喜欢亮面塑料。\n```',
+    'What does this command mean?\nRemember that I prefer glossy plastic.',
+])
+async def test_discussed_memory_commands_do_not_pollute_later_conversations(chat_rig, message):
+    chat, (workflow, store, tools, _) = chat_rig
+    first = await send(chat, '记住我的偏好：哑光青瓷。')
+    original = workflow.memory.list()
+    discussed = await send(chat, message, first['conversationId'], 'discuss')
+    assert discussed['status'] == 'COMPLETED' and discussed['jobId'] is None
+    recalled = await send(chat, '我喜欢什么材质？', key='another-conversation')
+    assert recalled['conversationId'] != first['conversationId']
+    assert workflow.memory.list() == original
+    context = chat.model.history[-1]
+    assert '哑光青瓷' in context[1].content
+    assert '亮面塑料' not in str(context) and 'glossy plastic' not in str(context)
+    assert workflow.memory.list()[0]['source_turn_id'] == first['id']
+    assert recalled['contextStats']['memorySourceIds'] == ['pref:explicit-description']
+    assert not store.list() and not tools.calls
+
+
 async def test_long_chat_reuses_preference_after_dropping_an_old_turn(chat_rig):
     chat, (workflow, store, tools, _) = chat_rig
     workflow.memory.set_preference('glaze', '哑光青瓷')
