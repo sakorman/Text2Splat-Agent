@@ -92,7 +92,7 @@ def create_server(kind, settings, port):
 
         @tool
         def webscan_get_result(job_id: str) -> dict:
-            """Return job/session IDs and artifact links after matching reconstruction succeeds."""
+            """Return job/session IDs and links after reconstruction succeeds and the PLY layout checks out."""
             return scan.result(job_id)
 
         @tool
