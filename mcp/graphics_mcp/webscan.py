@@ -3,11 +3,13 @@ import threading
 
 import httpx
 
+from .gaussian_ply import PLY_PREFIX_BYTES, gaussian_vertex_count
 from .settings import Settings
 from .store import Store, valid_id
 
 RECONSTRUCTION_CONFIG = {"backend": "brush", "steps": 3000, "resolution": 512, "max_points": 150000,
                          "camera_mode": "auto", "evaluation_mode": "all"}
+TEMPORARY_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 
 
 class TemporaryWebscanError(ValueError):
@@ -26,7 +28,7 @@ class Webscan:
             response.raise_for_status()
             return response.json()
         except httpx.HTTPStatusError as exc:
-            error = TemporaryWebscanError if exc.response.status_code in {408, 429, 500, 502, 503, 504} else ValueError
+            error = TemporaryWebscanError if exc.response.status_code in TEMPORARY_STATUS_CODES else ValueError
             raise error(f"web-scan 返回 HTTP {exc.response.status_code}，请检查本地服务及输入照片") from None
         except httpx.RequestError:
             raise TemporaryWebscanError("无法连接本地 web-scan，请启动服务后重试；不会切换云端 GPU") from None
@@ -163,11 +165,40 @@ class Webscan:
         listed = manifest.get("files")
         if not isinstance(listed, list):
             raise ValueError("重建产物清单格式无效")
-        files = [{"name": f["name"], "bytes": f["bytes"],
-                  "url": f"{self.url}/api/jobs/{job_id}/artifacts/{f['name']}?download=true"}
-                 for f in listed if f["name"] in {"gaussians.ply", "preview.splat", "report.json", "cameras.json"} and f["bytes"] > 0]
-        if not any(f["name"] == "gaussians.ply" for f in files):
+        files = {}
+        base = f"/api/jobs/{job_id}/artifacts/"
+        for item in listed:
+            if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+                raise ValueError("重建产物清单格式无效")
+            name, size = item["name"], item.get("bytes")
+            if name not in {"gaussians.ply", "preview.splat", "report.json", "cameras.json"}:
+                continue
+            if name in files or type(size) is not int or size < 0:
+                raise ValueError("重建产物清单大小或文件名无效")
+            files[name] = {"name": name, "bytes": size, "url": f"{self.url}{base}{name}?download=true"}
+        ply_size = files.get("gaussians.ply", {}).get("bytes", 0)
+        if not ply_size:
             raise ValueError("任务报告成功，但缺少有效的 Gaussian PLY 产物")
+        count = self._verify_ply(base + "gaussians.ply", ply_size)
         return {"job_id": job_id, "session_id": status["session_id"],
                 "viewer_url": f"{self.url}/?p={status['session_id']}&j={job_id}",
-                "files": files, "report": status.get("report"), "backend": "brush"}
+                "files": [f for f in files.values() if f["bytes"]], "ply_vertex_count": count,
+                "report": status.get("report"), "backend": "brush"}
+
+    def _verify_ply(self, path, size):
+        length = min(PLY_PREFIX_BYTES, size)
+        try:
+            with self.client.stream("GET", path, follow_redirects=False, headers={
+                    "Range": f"bytes=0-{PLY_PREFIX_BYTES - 1}", "Accept-Encoding": "identity"}) as response:
+                if response.status_code in TEMPORARY_STATUS_CODES:
+                    raise TemporaryWebscanError(f"Gaussian PLY 暂不可读：HTTP {response.status_code}")
+                if (response.status_code != 206 or response.headers.get("content-encoding", "identity") != "identity"
+                        or response.headers.get("content-range") != f"bytes 0-{length - 1}/{size}"
+                        or response.headers.get("content-length") != str(length)):
+                    raise ValueError("Gaussian PLY 无法读取有效的文件头，或大小与清单不符")
+                prefix = next(response.iter_raw(chunk_size=length), b"")
+        except httpx.RequestError:
+            raise TemporaryWebscanError("无法读取本地 Gaussian PLY，请检查 web-scan 服务") from None
+        if len(prefix) != length:
+            raise ValueError("Gaussian PLY 文件头读取不完整")
+        return gaussian_vertex_count(prefix, size)

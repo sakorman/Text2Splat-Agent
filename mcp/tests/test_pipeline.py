@@ -14,6 +14,7 @@ from graphics_mcp.server import create_server
 from graphics_mcp.settings import Settings, local_url
 from graphics_mcp.store import Store
 from graphics_mcp.webscan import Webscan
+from test_webscan_ply import ply_fixture
 
 
 def png(index=0):
@@ -329,6 +330,7 @@ def test_webscan_http_contract_and_artifact_gate(setup):
     requests, jobs = [], []
     session_status = "capturing"
     has_ply = False
+    ply = ply_fixture()
 
     def respond(request):
         nonlocal session_status
@@ -356,7 +358,11 @@ def test_webscan_http_contract_and_artifact_gate(setup):
             return httpx.Response(200, json={"id": jid, "session_id": sid, "status": "succeeded"})
         if path.endswith("/artifacts"):
             return httpx.Response(200, json={"job_id": jid,
-                "files": [{"name": "gaussians.ply", "bytes": 100}] if has_ply else []})
+                "files": [{"name": "gaussians.ply", "bytes": len(ply)}] if has_ply else []})
+        if path == f"/api/jobs/{jid}/artifacts/gaussians.ply":
+            assert has_ply and request.headers["range"] == "bytes=0-16383"
+            return httpx.Response(206, headers={"Content-Range": f"bytes 0-{len(ply)-1}/{len(ply)}",
+                                               "Content-Length": str(len(ply))}, stream=httpx.ByteStream(ply))
         raise AssertionError(path)
 
     scan = Webscan(settings, store, httpx.Client(base_url=settings.webscan_url, transport=httpx.MockTransport(respond)))
@@ -378,6 +384,7 @@ def test_webscan_http_contract_and_artifact_gate(setup):
     has_ply = True
     result = scan.result(jid)
     assert result["job_id"] == jid and result["session_id"] == sid
+    assert result["ply_vertex_count"] == 1
     assert result["viewer_url"].endswith(f"?p={sid}&j={jid}")
     assert result["files"][0]["name"] == "gaussians.ply"
 

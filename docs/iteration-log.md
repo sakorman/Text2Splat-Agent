@@ -469,3 +469,25 @@ web-scan 尚未提供原生请求幂等键，不能将“唯一采集与参数�
 - 使用真实 LangGraph、临时 SQLite 与明确的模型/工具替身，验证示例讨论后新对话收到原偏好及原来源，未创建生成任务、未调用生图 MCP；3D 专家同样不将任务描述中的示例变成偏好。既有明确偏好跨任务、重启、遗忘和当前要求优先的测试继续通过。
 - 核实本机无活动生成与待回复消息并验证进程命令/目录后，仅重启本项目 Agent。8088 健康检查通过，仍为 GLM-5.3-Flash、两个 Agent、ReAct、内置 MCP 及关闭付费图片。4 条生成记录、4 条对话的 ID/状态，以及记忆与遗忘表内容摘要均保持一致；没有重启 MCP 或修改其他项目。
 - 本轮未调用真实文本/图片模型或训练，没有消耗用户 API 额度或下载权重。该规则仅覆盖受支持的显式格式，不是任意自然语言的意图识别；其他位置的明确偏好可单独发送或使用记忆 API。旧误记不会自动清除，可用既有 API 查看、修正或删除。真实生图、多视角几何一致性与本机 3D 重建质量仍待独立验收。
+
+## 2026-11-11：确认 Gaussian PLY 文件结构后再发布结果
+
+开始时工作区干净，无适用的 AGENTS.md；本地工作分支、用户仓库 main 与同名分支均为 `03c8931`，两条对应 CI 成功。上一轮已验证结果归属，但匹配任务的清单只要报告 `gaussians.ply` 大小为正，Agent 就会接受。即使下载文件是普通点云、已删除或被截断，也可能展示成功。
+
+- Web-scan MCP 对固定的本机 PLY 路径发出只读 Range 请求（最多 16 KiB），要求响应范围和大小与清单一致，不跟随跳转。验证小端二进制 PLY 的顶点数量、float32 字段、Gaussian 位置、旋转、尺度、颜色和不透明度字段，以及完整的球谐系数布局，再比较文件头和顶点记录推算出的总长度。
+- MCP 返回通过校验的 `ply_vertex_count`，Agent 除现有的任务和采集 ID 核对外，还要求有效顶点计数。旧 MCP 只有文件清单的回执不会进入 READY 或生成已验证的产物记忆。格式错误不重试，明确的临时 HTTP/网络故障沿用只读查询的退避规则；不重发训练，不回填旧记录。
+
+### 来源与取舍
+
+检索和阅读日期：2026-11-11。
+
+- [PlayCanvas SplatTransform v3.11.0](https://github.com/playcanvas/splat-transform/releases/tag/v3.11.0) 于 2026-11-10 21:41 UTC 发布；阅读该版本 [PLY reader](https://github.com/playcanvas/splat-transform/blob/v3.11.0/src/lib/readers/read-ply.ts#L775)，其未压缩二进制路径用文件头与每个元素的记录步长推算总大小。这里只实现当前 Web-scan 导出的 Gaussian 子集，不引入通用解析器、压缩格式或新依赖。
+- 核对本机 Apple Silicon 上的 [web-scan 导出与下载实现](https://github.com/sakorman/web-scan/commit/48518c73dd969208f4cdaa26b789175e5ea557fb)（2026-11-11 02:03 UTC）及该版本的 [下载测试](https://github.com/sakorman/web-scan/blob/48518c73dd969208f4cdaa26b789175e5ea557fb/tests/test_downloads.py)：Brush 转换时已经读取训练结果和检查浮点字段，`FileResponse` 支持局部读取。依据 [RFC 9110 §14.4](https://www.rfc-editor.org/rfc/rfc9110.html#section-14.4) 使用 `206` 的 `Content-Range` 核对总长度，避免 Agent 重复下载和解析全部顶点。
+- 阅读 [LangGraph 1.2.20](https://github.com/langchain-ai/langgraph/releases/tag/1.2.20)（2026-11-05 发布）收录的 [严格恢复源码差异](https://github.com/langchain-ai/langgraph/pull/9574/files)（2026-11-04 合并），它针对 `Command(resume=...)` 校验待处理的中断 ID。本项目使用只读恢复和终止遗留任务，未启用中断重放，因此保留现有版本和行为。
+- [BudgetSplat](https://arxiv.org/abs/2611.06593) 首次提交于 2026-11-04，检索时仅 v1。阅读[正文 §3–4](https://arxiv.org/html/2611.06593v1)：其前馈方法通过训练学习跨视图冗余和覆盖，实验使用 ScanNet、Replica，训练使用 RTX 4090。论文评估的是视图渲染与体积取舍，没有验证现有生成图的几何一致性，也不是对现有 Brush PLY 的完整性检查；本轮不改重建器或引入新权重。
+
+### 验证与边界
+
+- 18 个新用例在旧实现上失败，覆盖未读取文件、截断或布局错误、异常 Range 回执，以及旧 MCP 缺少校验结果。修复后 124 项专项测试、320 项 Python 全量测试、11 项 Node 测试通过；依赖、前端语法及 Git 差异检查通过。
+- 只读核对本机 web-scan 已有的 3 份真实产物（约 1.1–2.8 MB），均通过有限前缀验证；更新空闲的 Agent 和 Web-scan MCP 后，经真实 MCP 会话再次核对已有产物成功。8088 健康检查通过，4 条生成记录、4 条对话及本地记忆表内容均与重启前一致。
+- 本轮没有调用模型 API、发起训练或下载权重。结构检查发现文件缺失、截断与布局不符，不校验每个顶点、文件摘要或几何质量；长度一致的顶点数据损坏仍可能漏过，既有产物也不能代替文字到 3D 的端到端验收。

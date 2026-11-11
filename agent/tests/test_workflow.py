@@ -90,7 +90,7 @@ class FakeTools:
             return {"id": TRAIN, "session_id": SESSION,
                     "status": "failed" if self.fail_training else "succeeded", "stage": "sfm", "message": "测试状态"}
         if name == "webscan_get_result":
-            return {"job_id": TRAIN, "session_id": SESSION,
+            return {"job_id": TRAIN, "session_id": SESSION, "ply_vertex_count": 1,
                     "viewer_url": "http://127.0.0.1:8787/?p=" + SESSION + "&j=" + TRAIN,
                     "files": [] if self.missing_ply else [{"name": "gaussians.ply", "bytes": 100, "url": "/test.ply"}]}
         if name in {"creative_cancel_job", "webscan_cancel_reconstruction"}:
@@ -167,6 +167,27 @@ async def test_foreign_or_missing_read_identity_cannot_complete_current_task(rig
         assert not tools.calls[blocked]
     checkpoint = await saver.aget_tuple({"configurable": {"thread_id": job["id"]}})
     assert not checkpoint.checkpoint["channel_values"].get("verified_result")
+    assert not any(m.get("artifact_verified") for m in workflow.memory.list())
+
+
+@pytest.mark.parametrize("count", [None, True, 0, "1"])
+async def test_manifest_only_result_cannot_finish_or_be_remembered_as_verified(rig, monkeypatch, count):
+    workflow, _, tools, _ = rig
+    original = tools.call
+
+    async def without_evidence(name, args):
+        result = await original(name, args)
+        if name == "webscan_get_result":
+            if count is None:
+                result.pop("ply_vertex_count")  # An older MCP reports only manifest metadata.
+            else:
+                result["ply_vertex_count"] = count
+        return result
+
+    monkeypatch.setattr(tools, "call", without_evidence)
+    job = await complete(workflow)
+    assert job["status"] == "FAILED" and "result" not in job and "PLY" in job["message"]
+    assert tools.calls["webscan_get_result"] == tools.calls["webscan_start_reconstruction"] == 1
     assert not any(m.get("artifact_verified") for m in workflow.memory.list())
 
 

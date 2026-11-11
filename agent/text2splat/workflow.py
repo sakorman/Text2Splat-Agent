@@ -464,6 +464,9 @@ class Workflow:
         result = await self.read(state, "webscan_get_result", {"job_id": state["reconstruction_id"]})
         if result.get("job_id") != state["reconstruction_id"] or result.get("session_id") != state["session_id"]:
             raise ToolFailure("重建产物的任务或采集标识不匹配，未采用该结果")
+        count = result.get("ply_vertex_count")
+        if type(count) is not int or count <= 0:
+            raise ToolFailure("缺少 Gaussian PLY 文件结构校验结果，请检查 Web-scan MCP 版本")
         if not any(isinstance(f, dict) and f.get("name") == "gaussians.ply" and f.get("url")
                    and isinstance(f.get("bytes"), (int, float)) and f["bytes"] > 0 for f in result.get("files", [])):
             raise ToolFailure("缺少有效的 Gaussian PLY 产物")

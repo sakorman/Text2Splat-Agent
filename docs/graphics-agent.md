@@ -83,7 +83,7 @@ Creative 与 Web-scan 两个服务只监听 loopback，使用 `/mcp` Streamable 
 | `webscan_start_reconstruction` | `session_id`, `request_id` | `job_id` |
 | `webscan_get_status` | `job_id` | `id`、`session_id`、真实阶段、进度和报告 |
 | `webscan_get_request` | `request_id` | 恢复可能丢失响应的训练任务 ID |
-| `webscan_get_result` | `job_id` | `job_id`、`session_id`、有效 Gaussian PLY、viewer 与其他产物链接 |
+| `webscan_get_result` | `job_id` | `job_id`、`session_id`、通过结构校验的 `ply_vertex_count`、viewer 与产物链接 |
 | `webscan_cancel_reconstruction` | `job_id` | 下游取消状态 |
 
 ## 免费路径与可选生图路径
@@ -93,7 +93,7 @@ Creative 与 Web-scan 两个服务只监听 loopback，使用 `/mcp` Streamable 
 3. 3D 模式按同一规格逐张请求 12 个角度。每张保存后按归一化 RGB 像素摘要与已有候选图比较，完全重复即终止为 `needs_review`，指出重复的两张图、保留已有图片，不调用剩余生图或外观审核，不发布可导入集合、不自动补图。仅调整编码或 PNG 元数据不能绕过检查；此处不判断近似重复或几何一致性。CogView 不接收参考图，因此完成的清单明确记录 `reference_conditioned=false`、`geometry_verified=false`。
 4. `glm-4.6v-flash` 接收缩略参考图和候选视图，检查明显结构差异、拼图和视角变化。格式异常或判断不一致时，不开始重建。
 5. web-scan 再次验证不同照片数量与像素数据，冻结 manifest。COLMAP 估计相机，Brush 用实际估计结果训练。
-6. 真实训练成功且存在非空 Gaussian PLY 后，Agent 才返回 `READY`。
+6. 真实训练成功后，Web-scan MCP 读取 PLY 的前 16 KiB（小文件读取到文件末尾），验证 Gaussian 字段和二进制顶点布局，按文件头和顶点记录计算总大小，并与 HTTP `Content-Range` 及清单核对。Agent 只在匹配当前任务、采集且带有有效 `ply_vertex_count` 的结果上进入 `READY`。旧 MCP 缺少该字段时应更新并重启；已有任务记录不回填。
 
 智谱的 `response_format` 参数仅用于文本模型：设计规划启用 JSON 模式；视觉审核通过提示词要求 JSON，再在本地解析并检查 `consistent` 布尔值和 `reason` 字符串。空回复、非 JSON、截断或字段异常均停止流程，不发布可重建集合，不自动重试审核。视觉接口不携带仅文本模型支持的参数；这不代表审核已经通过真实模型或几何验证。
 
