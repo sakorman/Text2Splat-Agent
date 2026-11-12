@@ -98,8 +98,8 @@ class Workflow:
             except asyncio.CancelledError:
                 pass  # Durable intent remains for the next startup's reconciliation.
 
-    def submit(self, prompt, mode, parent, key):
-        job, created = self.store.create(prompt, mode, parent, key)
+    def submit(self, prompt, mode, parent, key, *, prompt_source="delegated"):
+        job, created = self.store.create(prompt, mode, parent, key, prompt_source=prompt_source)
         if created:
             self.queue.put_nowait(("run", job["id"]))
         return job
@@ -154,7 +154,9 @@ class Workflow:
 
     async def run(self, jid):
         job = self.store.get(jid)
-        self.memory_call(lambda: self.memory.capture_explicit_preference(job["prompt"], jid), None)
+        # Only direct user text is a preference command. Chat already captures the original turn.
+        if job.get("promptSource") == "user":
+            self.memory_call(lambda: self.memory.capture_explicit_preference(job["prompt"], jid), None)
         recalled = self.memory_call(lambda: self.memory.recall(job["prompt"], jid), [])
         self.store.update(jid, memorySources=[m["id"] for m in recalled])
         state = State(job_id=jid, prompt=job["prompt"], mode=job["mode"],

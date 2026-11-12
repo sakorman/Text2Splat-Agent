@@ -194,8 +194,8 @@ def create_app(settings=None, tools=None, model=None, chat_model=None):
     async def create(body: CreateRequest, request: Request):
         key = request.headers.get("idempotency-key", str(uuid.uuid4()))
         if body.mode == "THREE_D":
-            return await app.state.generation.generate(body.prompt, key, body.parentJobId)
-        return app.state.workflow.submit(body.prompt, body.mode, body.parentJobId, key)
+            return await app.state.generation.generate(body.prompt, key, body.parentJobId, prompt_source="user")
+        return app.state.workflow.submit(body.prompt, body.mode, body.parentJobId, key, prompt_source="user")
 
     @app.get("/api/graphics/jobs")
     async def jobs():

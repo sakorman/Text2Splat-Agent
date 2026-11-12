@@ -40,7 +40,7 @@ async def test_completed_task_is_recalled_after_service_restart(tmp_path):
 
 async def test_explicit_preference_flows_into_new_tasks_but_does_not_replace_current_request(rig):
     workflow, store, tools, _ = rig
-    job = workflow.submit("记住我的偏好：哑光青瓷。\n生成一个小鸟", "CONCEPT", None, "pref")
+    job = workflow.submit("记住我的偏好：哑光青瓷。\n生成一个小鸟", "CONCEPT", None, "pref", prompt_source="user")
     await asyncio.wait_for(workflow.queue.join(), 3)
     assert store.get(job["id"])["status"] == "CONCEPT_READY"
     workflow.model = FakeModel()
@@ -58,7 +58,7 @@ async def test_discussed_memory_command_in_task_does_not_replace_user_preference
     workflow, store, tools, _ = rig
     original = workflow.memory.capture_explicit_preference('记住我的偏好：哑光青瓷。', turn_id='a' * 32)
     workflow.model = FakeModel([action('stop')])
-    job = workflow.submit('下面只是说明文字：\n记住我的偏好：亮面塑料。', 'CONCEPT', None, 'example')
+    job = workflow.submit('下面只是说明文字：\n记住我的偏好：亮面塑料。', 'CONCEPT', None, 'example', prompt_source='user')
     await asyncio.wait_for(workflow.queue.join(), 3)
     assert store.get(job['id'])['status'] == 'FAILED'
     assert workflow.memory.list() == [original]
