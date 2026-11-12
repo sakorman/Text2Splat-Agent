@@ -82,7 +82,7 @@ class JobStore:
                 return job
         raise KeyError("尚未找到这个提交对应的任务")
 
-    def create(self, prompt, mode, parent_id, key):
+    def create(self, prompt, mode, parent_id, key, *, prompt_source="delegated"):
         valid_key(key)
         if not isinstance(prompt, str) or not 2 <= len(prompt.strip()) <= 2000 or mode not in {"CONCEPT", "THREE_D"}:
             raise ValueError("请提供 2–2000 字描述和有效的生成模式")
@@ -99,7 +99,7 @@ class JobStore:
             if sum(j["status"] not in TERMINAL for j in jobs) >= 16:
                 raise ValueError("任务队列已满，请稍后再试")
             stamp = now()
-            job = dict(id=uuid.uuid4().hex, prompt=prompt, mode=mode, parentJobId=parent_id,
+            job = dict(id=uuid.uuid4().hex, prompt=prompt, promptSource=prompt_source, mode=mode, parentJobId=parent_id,
                        requestKey=key, status="QUEUED", stage="queued", message="等待开始",
                        cancelRequested=False, createdAt=stamp, updatedAt=stamp,
                        referenceAssets=[], viewAssets=[])

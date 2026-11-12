@@ -80,6 +80,21 @@ def test_request_recovery_is_read_only(client):
     assert client.post("/api/graphics/jobs/" + job["id"] + "/cancel").json()["status"] == "CANCELLED"
 
 
+@pytest.mark.parametrize("mode", ["CONCEPT", "THREE_D"])
+def test_direct_creation_keeps_explicit_user_preference_capture(client, mode):
+    response = client.post("/api/graphics/jobs", json={"prompt": "记住我的偏好：哑光青瓷。\n生成花瓶", "mode": mode})
+    assert response.status_code == 202
+    jid = response.json()["id"]
+    for _ in range(100):
+        if client.get(f"/api/graphics/jobs/{jid}").json()["status"] == "FAILED":
+            break
+        time.sleep(.01)
+    records = client.get("/api/graphics/memories").json()
+    assert len(records) == 1
+    assert records[0]["value"] == "哑光青瓷" and records[0]["source_job_id"] == jid
+    assert records[0]["source_turn_id"] is None
+
+
 def test_assets_reject_absent_invalid_names_and_symlinks(client, tmp_path):
     assets = tmp_path / "assets" / ("a" * 32)
     assets.mkdir(parents=True)
