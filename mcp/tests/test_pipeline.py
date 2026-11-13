@@ -321,11 +321,69 @@ def test_langchain_model_calls_never_retry_or_expose_provider_errors(setup, fail
     assert "secret-provider-detail" not in str(caught.value)
 
 
-def test_webscan_http_contract_and_artifact_gate(setup):
+@pytest.mark.parametrize("fault", ["replaced", "duplicate", "corrupt", "missing", "wrong-name", "legacy-digest"])
+def test_unreviewed_or_invalid_view_never_creates_capture(setup, fault):
     settings, store, _, creative = setup
     ref = completed_reference(creative, store)
-    multi = creative.multiview(ref, "multi")
+    aid = creative.multiview(ref, "multi")["id"]
     creative.execute(*store.claim())
+    assert store.get(aid)["status"] == "succeeded"
+    directory = store.directory(aid)
+    last = directory / "11.png"
+    if fault == "replaced":
+        last.write_bytes(png(42))
+    elif fault == "duplicate":
+        last.write_bytes((directory / "00.png").read_bytes())
+    elif fault == "corrupt":
+        last.write_bytes(last.read_bytes()[:64])
+    elif fault == "missing":
+        last.unlink()
+    else:
+        manifest = store.manifest(aid)
+        if fault == "wrong-name":
+            manifest["assets"][-1]["name"] = "00.png"
+        else:
+            del manifest["assets"][-1]["file_sha256"]
+        store.save_manifest(aid, manifest)
+
+    sid = "a" * 32
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json={"id": sid, "status": "capturing"})
+
+    with httpx.Client(base_url=settings.webscan_url, transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(ValueError, match="第 12 张"):
+            Webscan(settings, store, client).import_views(aid)
+    assert requests == [] and store.link("import:" + aid) is None
+
+
+def test_webscan_http_contract_and_artifact_gate(setup):
+    settings, store, fake, creative = setup
+    ref = completed_reference(creative, store)
+    multi = creative.multiview(ref, "multi")
+    aid = multi["id"]
+    # Provider encodings may differ from the normalized files saved for reconstruction.
+    def image_with_metadata(prompt, reference):
+        raw = FakeProviders.image(fake, prompt, reference)
+        info = PngImagePlugin.PngInfo()
+        info.add_text("origin", "provider")
+        buf = io.BytesIO()
+        with Image.open(io.BytesIO(raw)) as image:
+            image.save(buf, "PNG", pnginfo=info)
+        return buf.getvalue()
+
+    def review_saved_files(reference, views):
+        assert views == [(store.directory(aid) / f"{i:02d}.png").read_bytes() for i in range(12)]
+        return FakeProviders.review(fake, reference, views)
+
+    fake.image = image_with_metadata
+    fake.review = review_saved_files
+    creative.execute(*store.claim())
+    assert store.get(aid)["status"] == "succeeded"
+    first_view = store.directory(aid) / "00.png"
+    original_first = first_view.read_bytes()
     sid, jid = "a" * 32, "b" * 32
     requests, jobs = [], []
     session_status = "capturing"
@@ -337,12 +395,16 @@ def test_webscan_http_contract_and_artifact_gate(setup):
         requests.append(request)
         path = request.url.path
         if path == "/api/sessions" and request.method == "POST":
+            # A later disk edit must not change the already-validated bytes sent to Web-scan.
+            first_view.write_bytes(png(42))
             return httpx.Response(201, json={"id": sid})
         if path == f"/api/sessions/{sid}":
             return httpx.Response(200, json={"id": sid, "status": session_status, "jobs": jobs})
         if path.endswith("/frames"):
             assert b'"source": "ai-generated"' in request.content
             assert b"extrinsics" not in request.content
+            if b'filename="00.png"' in request.content:
+                assert original_first in request.content
             return httpx.Response(200, json={"ok": True})
         if path.endswith("/finalize"):
             session_status = "ready"

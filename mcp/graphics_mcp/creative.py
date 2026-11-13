@@ -73,7 +73,7 @@ class Creative:
                                                   "已停止后续生成，未开始重建。请调整描述后重试。")
                         return
                     seen[digest] = index
-                    views.append(raw)
+                    views.append(self.store.read_candidate(jid, index, assets[-1]))
                     self.store.update(jid, assets=assets)
                 self.checkpoint(jid)
                 self.store.update(jid, stage="review", message="正在检查物件外观一致性")
