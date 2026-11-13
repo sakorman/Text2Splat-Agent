@@ -2,6 +2,7 @@ import asyncio
 from collections import Counter
 import json
 import time
+from types import SimpleNamespace
 
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -11,6 +12,7 @@ import pytest_asyncio
 from text2splat.settings import AgentSettings
 from text2splat.store import JobStore, TERMINAL
 from text2splat.tools import TemporaryToolFailure, ToolFailure
+import text2splat.workflow as workflow_module
 from text2splat.workflow import Workflow, State
 
 pytestmark = pytest.mark.asyncio
@@ -311,17 +313,26 @@ async def test_read_retry_limit_and_permanent_failure(rig, permanent, expected):
 
 
 @pytest.mark.parametrize("cancel", [True, False])
-async def test_backoff_observes_cancellation_and_original_deadline(rig, cancel):
+async def test_backoff_observes_cancellation_and_original_deadline(rig, cancel, monkeypatch):
     workflow, store, tools, _ = rig
     from dataclasses import replace
-    workflow.settings = replace(workflow.settings, poll_interval=1, job_timeout=5 if cancel else .1)
+    now = time.time()
+    # Control only the workflow's deadline clock; keep real backoff and scheduling.
+    monkeypatch.setattr(workflow_module, "time", SimpleNamespace(time=lambda: now, monotonic=time.monotonic))
+    workflow.settings = replace(workflow.settings, poll_interval=1, job_timeout=5)
     tools.fail_tool, tools.failures = "creative_get_job", 10
     job = workflow.submit("一个青瓷花瓶", "THREE_D", None, "backoff")
     await asyncio.wait_for(tools.entered.wait(), 2)
+    assert store.get(job["id"])["connectionRetry"] == 1
     if cancel:
         workflow.cancel(job["id"])
-    await asyncio.wait_for(workflow.queue.join(), 1)
-    assert store.get(job["id"])["status"] == ("CANCELLED" if cancel else "FAILED")
+    else:
+        now += workflow.settings.job_timeout
+    await asyncio.wait_for(workflow.queue.join(), 3)
+    final = store.get(job["id"])
+    assert final["status"] == ("CANCELLED" if cancel else "FAILED")
+    if not cancel:
+        assert "超过最长等待时间" in final["message"]
     assert tools.calls["creative_get_job"] == 1
 
 
