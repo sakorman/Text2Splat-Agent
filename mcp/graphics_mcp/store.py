@@ -125,6 +125,24 @@ class Store:
         temp.write_text(json.dumps(data, ensure_ascii=False, indent=2))
         temp.replace(directory / "manifest.json")
 
+    def read_candidate(self, asset_id, index, asset):
+        """Read the same bounded PNG snapshot for review and for upload."""
+        name = f"{index:02d}.png"
+        label = f"第 {index + 1} 张候选视图"
+        if not isinstance(asset, dict) or asset.get("name") != name:
+            raise ValueError(f"{label}的清单格式错误，未开始重建")
+        expected = asset.get("file_sha256")
+        if not isinstance(expected, str) or not re.fullmatch(r"[a-f0-9]{64}", expected):
+            raise ValueError(f"{label}缺少有效的文件摘要，未开始重建")
+        try:
+            with (self.directory(asset_id) / name).open("rb") as stream:
+                raw = stream.read(MAX_IMAGE_BYTES + 1)
+        except OSError:
+            raise ValueError(f"{label}无法读取，未开始重建") from None
+        if not raw or len(raw) > MAX_IMAGE_BYTES or hashlib.sha256(raw).hexdigest() != expected:
+            raise ValueError(f"{label}与生成时保存的文件不一致，未开始重建")
+        return raw
+
     def save_image(self, asset_id, index, raw):
         if not raw or len(raw) > MAX_IMAGE_BYTES:
             raise ValueError("图片为空或超过 16 MB")
@@ -137,5 +155,9 @@ class Store:
             directory = self.directory(asset_id)
             directory.mkdir(exist_ok=True)
             name = f"{index:02d}.png"
-            image.save(directory / name, "PNG")
-        return dict(name=name, sha256=digest, url=f"/api/graphics/assets/{asset_id}/{name}")
+            encoded = io.BytesIO()
+            image.save(encoded, "PNG")
+            png = encoded.getvalue()
+            (directory / name).write_bytes(png)
+        return dict(name=name, sha256=digest, file_sha256=hashlib.sha256(png).hexdigest(),
+                    url=f"/api/graphics/assets/{asset_id}/{name}")

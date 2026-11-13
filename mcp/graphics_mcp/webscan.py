@@ -44,7 +44,9 @@ class Webscan:
         valid_id(asset_set_id)
         manifest = self.store.manifest(asset_set_id)
         images = manifest.get("assets", [])
-        if manifest.get("kind") != "multiview" or len(images) != 12 or len({a["sha256"] for a in images}) != 12:
+        if (manifest.get("kind") != "multiview" or not isinstance(images, list) or len(images) != 12
+                or not all(isinstance(a, dict) and isinstance(a.get("sha256"), str) for a in images)
+                or len({a["sha256"] for a in images}) != 12):
             raise ValueError("重建需要 12 张不同的候选视图")
         if manifest.get("review", {}).get("consistent") is not True:
             raise ValueError("候选视图尚未通过外观一致性检查")
@@ -53,6 +55,9 @@ class Webscan:
             linked = self.store.link(key)
             if linked and linked.get("complete"):
                 return linked
+            # Verify every file before any upload. Keep those bytes for the request
+            # so a later on-disk change cannot substitute a different picture.
+            snapshots = [self.store.read_candidate(asset_set_id, index, asset) for index, asset in enumerate(images)]
             if linked:
                 session_id = linked["session_id"]
             else:
@@ -61,11 +66,8 @@ class Webscan:
                 self.store.link(key, {"session_id": session_id, "complete": False})
             session = self.request("GET", f"/api/sessions/{session_id}")
             if session["status"] != "ready":
-                for index, asset in enumerate(images):
+                for index, raw in enumerate(snapshots):
                     name = f"{index:02d}.png"
-                    if asset["name"] != name:
-                        raise ValueError("图片清单格式错误")
-                    raw = (self.store.directory(asset_set_id) / name).read_bytes()
                     self.request("POST", f"/api/sessions/{session_id}/frames",
                                  files={"file": (name, raw, "image/png")},
                                  data={"metadata": json.dumps({"source": "ai-generated", "order": index})})
