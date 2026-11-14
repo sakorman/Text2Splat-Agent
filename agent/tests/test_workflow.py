@@ -87,7 +87,7 @@ class FakeTools:
                     "stage": "review" if multi else "reference", "asset_set_id": VIEWS if multi else REF,
                     "assets": [{"url": "/api/graphics/assets/" + REF + "/00.png"}], "spec": {"title": "测试花瓶"}}
         if name == "webscan_import_generated_views":
-            return {"session_id": SESSION}
+            return {"session_id": SESSION, "asset_set_id": args["asset_set_id"], "images": 12, "complete": True}
         if name == "webscan_get_status":
             return {"id": TRAIN, "session_id": SESSION,
                     "status": "failed" if self.fail_training else "succeeded", "stage": "sfm", "message": "测试状态"}
@@ -170,6 +170,24 @@ async def test_foreign_or_missing_read_identity_cannot_complete_current_task(rig
     checkpoint = await saver.aget_tuple({"configurable": {"thread_id": job["id"]}})
     assert not checkpoint.checkpoint["channel_values"].get("verified_result")
     assert not any(m.get("artifact_verified") for m in workflow.memory.list())
+
+
+@pytest.mark.parametrize("changes", [{"asset_set_id": "f" * 32}, {"asset_set_id": None},
+                                     {"images": 11}, {"complete": False}])
+async def test_import_receipt_cannot_start_training_without_matching_capture(rig, monkeypatch, changes):
+    workflow, _, tools, _ = rig
+    original = tools.call
+
+    async def wrong_receipt(name, args):
+        result = await original(name, args)
+        return {**result, **changes} if name == "webscan_import_generated_views" else result
+
+    monkeypatch.setattr(tools, "call", wrong_receipt)
+    job = await complete(workflow)
+    assert job["status"] == "FAILED" and "导入" in job["message"]
+    assert "sessionId" not in job and "trainRequest" not in job and "result" not in job
+    assert tools.calls["webscan_import_generated_views"] == 1
+    assert tools.calls["webscan_start_reconstruction"] == 0
 
 
 @pytest.mark.parametrize("count", [None, True, 0, "1"])

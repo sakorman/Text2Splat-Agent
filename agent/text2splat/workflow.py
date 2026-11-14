@@ -432,6 +432,9 @@ class Workflow:
     async def import_views(self, state):
         self.stage(state, "IMPORTING", "importing", "正在导入本地重建服务")
         result = await self.tools.call("webscan_import_generated_views", {"asset_set_id": state["views_id"]})
+        if (result.get("asset_set_id") != state["views_id"] or result.get("complete") is not True
+                or type(result.get("images")) is not int or result["images"] != 12):
+            raise ToolFailure("导入回执未确认本次 12 张候选视图，未开始重建")
         sid = valid_id(result.get("session_id"))
         self.store.update(state["job_id"], sessionId=sid)
         self.check(state)

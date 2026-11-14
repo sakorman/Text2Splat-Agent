@@ -359,7 +359,43 @@ def test_unreviewed_or_invalid_view_never_creates_capture(setup, fault):
     assert requests == [] and store.link("import:" + aid) is None
 
 
-def test_webscan_http_contract_and_artifact_gate(setup):
+@pytest.mark.parametrize("fault", ["wrong-session", "foreign-frame", "missing-frame", "wrong-digest", "duplicate-order"])
+def test_import_rejects_unrelated_or_incomplete_ready_capture(setup, fault):
+    settings, store, _, creative = setup
+    ref = completed_reference(creative, store)
+    aid = creative.multiview(ref, "multi")["id"]
+    creative.execute(*store.claim())
+    sid = "a" * 32
+    key = "import:" + aid
+    store.link(key, {"session_id": sid, "complete": False})
+    frames = [{"id": f"{100 + i:032x}", "session_id": sid,
+               "metadata": {"source": "ai-generated", "order": i, "asset_set_id": aid,
+                            "file_sha256": a["file_sha256"]}}
+              for i, a in enumerate(store.manifest(aid)["assets"])]
+    reported_id = sid
+    if fault == "wrong-session":
+        reported_id = "b" * 32
+    elif fault == "foreign-frame":
+        frames[-1]["metadata"]["asset_set_id"] = "b" * 32
+    elif fault == "missing-frame":
+        frames.pop()
+    elif fault == "wrong-digest":
+        frames[-1]["metadata"]["file_sha256"] = "0" * 64
+    else:
+        frames[-1]["metadata"] = frames[0]["metadata"].copy()
+
+    def respond(request):
+        assert request.method == "GET" and request.url.path == f"/api/sessions/{sid}"
+        return httpx.Response(200, json={"id": reported_id, "kind": "photos", "status": "ready", "frames": frames})
+
+    with httpx.Client(base_url=settings.webscan_url, transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(ValueError, match="采集|视图"):
+            Webscan(settings, store, client).import_views(aid)
+    assert store.link(key) == {"session_id": sid, "complete": False}
+
+
+@pytest.mark.parametrize("lost_reply", [None, "frames", "finalize"], ids=["normal", "lost-frame", "lost-finalize"])
+def test_webscan_http_contract_and_artifact_gate(setup, lost_reply):
     settings, store, fake, creative = setup
     ref = completed_reference(creative, store)
     multi = creative.multiview(ref, "multi")
@@ -385,7 +421,7 @@ def test_webscan_http_contract_and_artifact_gate(setup):
     first_view = store.directory(aid) / "00.png"
     original_first = first_view.read_bytes()
     sid, jid = "a" * 32, "b" * 32
-    requests, jobs = [], []
+    requests, jobs, frames = [], [], []
     session_status = "capturing"
     has_ply = False
     ply = ply_fixture()
@@ -396,19 +432,28 @@ def test_webscan_http_contract_and_artifact_gate(setup):
         path = request.url.path
         if path == "/api/sessions" and request.method == "POST":
             # A later disk edit must not change the already-validated bytes sent to Web-scan.
-            first_view.write_bytes(png(42))
+            if lost_reply != "frames":
+                first_view.write_bytes(png(42))
             return httpx.Response(201, json={"id": sid})
         if path == f"/api/sessions/{sid}":
-            return httpx.Response(200, json={"id": sid, "status": session_status, "jobs": jobs})
+            return httpx.Response(200, json={"id": sid, "kind": "photos", "status": session_status,
+                                             "jobs": jobs, "frames": frames})
         if path.endswith("/frames"):
             assert b'"source": "ai-generated"' in request.content
             assert b"extrinsics" not in request.content
             if b'filename="00.png"' in request.content:
                 assert original_first in request.content
-            return httpx.Response(200, json={"ok": True})
+            metadata = json.loads(request.content.split(b'name="metadata"\r\n\r\n', 1)[1].split(b"\r\n", 1)[0])
+            fid = f"{100 + len(frames):032x}"
+            frames.append({"id": fid, "session_id": sid, "metadata": metadata})
+            if lost_reply == "frames" and len(frames) == 1:
+                raise httpx.ReadTimeout("lost frame response", request=request)
+            return httpx.Response(200, json={"id": fid, "duplicate": False})
         if path.endswith("/finalize"):
             session_status = "ready"
-            return httpx.Response(200, json={"id": sid})
+            if lost_reply == "finalize":
+                raise httpx.ReadTimeout("lost finalize response", request=request)
+            return httpx.Response(200, json={"status": "ready"})
         if path == "/api/jobs" and request.method == "POST":
             payload = json.loads(request.content)
             assert payload["backend"] == "brush" and payload["steps"] == 3000
@@ -428,12 +473,17 @@ def test_webscan_http_contract_and_artifact_gate(setup):
         raise AssertionError(path)
 
     scan = Webscan(settings, store, httpx.Client(base_url=settings.webscan_url, transport=httpx.MockTransport(respond)))
+    if lost_reply:
+        with pytest.raises(ValueError, match="无法连接"):
+            scan.import_views(aid)
+        assert store.link("import:" + aid)["complete"] is False
     imported = scan.import_views(multi["id"])
-    assert imported["session_id"] == sid
+    assert imported["session_id"] == sid and imported["asset_set_id"] == aid and imported["images"] == 12
     assert len([r for r in requests if r.url.path.endswith("/frames")]) == 12
+    assert len([r for r in requests if r.url.path.endswith("/finalize")]) == 1
     before = len(requests)
     scan.import_views(multi["id"])
-    assert len(requests) == before
+    assert [r.method for r in requests[before:]] == ["GET"]
     first = scan.start(sid, "train")
     assert scan.start(sid, "train") == first
     # A persisted intent and lost response recover the existing server-side job.

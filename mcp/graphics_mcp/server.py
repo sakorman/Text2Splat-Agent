@@ -72,7 +72,7 @@ def create_server(kind, settings, port):
 
         @tool
         def webscan_import_generated_views(asset_set_id: str) -> dict:
-            """Verify and import the exact files used for appearance review, then freeze the capture."""
+            """Verify reviewed files and confirm all views belong to the frozen capture before returning its ID."""
             return scan.import_views(asset_set_id)
 
         @tool
