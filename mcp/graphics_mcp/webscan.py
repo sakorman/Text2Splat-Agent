@@ -53,26 +53,54 @@ class Webscan:
         with self.lock:
             key = "import:" + asset_set_id
             linked = self.store.link(key)
-            if linked and linked.get("complete"):
-                return linked
-            # Verify every file before any upload. Keep those bytes for the request
-            # so a later on-disk change cannot substitute a different picture.
-            snapshots = [self.store.read_candidate(asset_set_id, index, asset) for index, asset in enumerate(images)]
+            capture = None
             if linked:
-                session_id = linked["session_id"]
-            else:
-                session = self.request("POST", "/api/sessions", json={"name": manifest["spec"]["title"][:80]})
-                session_id = valid_id(session["id"])
-                self.store.link(key, {"session_id": session_id, "complete": False})
-            session = self.request("GET", f"/api/sessions/{session_id}")
-            if session["status"] != "ready":
-                for index, raw in enumerate(snapshots):
-                    name = f"{index:02d}.png"
-                    self.request("POST", f"/api/sessions/{session_id}/frames",
-                                 files={"file": (name, raw, "image/png")},
-                                 data={"metadata": json.dumps({"source": "ai-generated", "order": index})})
-                self.request("POST", f"/api/sessions/{session_id}/finalize")
-            return self.store.link(key, {"session_id": session_id, "complete": True, "images": 12})
+                session_id = valid_id(linked["session_id"])
+                capture, orders = self._imported_views(session_id, asset_set_id, images)
+                if linked.get("complete") and capture["status"] != "ready":
+                    raise ValueError("已导入的采集不再处于冻结状态，未开始重建")
+            if capture is None or capture["status"] != "ready":
+                # Validate every local file before any upload and send these same bytes.
+                snapshots = [self.store.read_candidate(asset_set_id, i, asset) for i, asset in enumerate(images)]
+                if capture is None:
+                    session = self.request("POST", "/api/sessions", json={"name": manifest["spec"]["title"][:80]})
+                    session_id = valid_id(session["id"])
+                    self.store.link(key, {"session_id": session_id, "complete": False})
+                    capture, orders = self._imported_views(session_id, asset_set_id, images)
+                if capture["status"] == "capturing":
+                    for index, raw in enumerate(snapshots):
+                        if index in orders:
+                            continue  # A prior attempt already uploaded this view.
+                        metadata = {"source": "ai-generated", "order": index, "asset_set_id": asset_set_id,
+                                    "file_sha256": images[index]["file_sha256"]}
+                        receipt = self.request("POST", f"/api/sessions/{session_id}/frames",
+                                               files={"file": (f"{index:02d}.png", raw, "image/png")},
+                                               data={"metadata": json.dumps(metadata)})
+                        if not isinstance(receipt, dict) or receipt.get("duplicate") is not False:
+                            raise ValueError("采集未确认保存不同的候选视图，未开始重建")
+                    self.request("POST", f"/api/sessions/{session_id}/finalize")
+                    capture, orders = self._imported_views(session_id, asset_set_id, images)
+            if capture["status"] != "ready" or len(orders) != len(images):
+                raise ValueError("采集尚未冻结本次全部候选视图，未开始重建")
+            return self.store.link(key, {"session_id": session_id, "asset_set_id": asset_set_id,
+                                         "complete": True, "images": len(orders)})
+
+    def _imported_views(self, session_id, asset_set_id, images):
+        capture = self.request("GET", f"/api/sessions/{session_id}")
+        if (not isinstance(capture, dict) or capture.get("id") != session_id or capture.get("kind") != "photos"
+                or capture.get("status") not in ("capturing", "ready") or not isinstance(capture.get("frames"), list)):
+            raise ValueError("采集身份或状态不匹配，未开始重建")
+        orders = set()
+        for frame in capture["frames"]:
+            metadata = frame.get("metadata") if isinstance(frame, dict) else None
+            index = metadata.get("order") if isinstance(metadata, dict) else None
+            if (type(index) is not int or not 0 <= index < len(images) or index in orders
+                    or frame.get("session_id") != session_id or metadata.get("source") != "ai-generated"
+                    or metadata.get("asset_set_id") != asset_set_id or not images[index].get("file_sha256")
+                    or metadata.get("file_sha256") != images[index]["file_sha256"]):
+                raise ValueError("采集中的视图与本次候选图不匹配，未开始重建")
+            orders.add(index)
+        return capture, orders
 
     def start(self, session_id, request_id):
         valid_id(session_id)
