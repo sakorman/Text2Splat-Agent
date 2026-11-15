@@ -202,11 +202,56 @@ async def test_dropped_mcp_response_recovers_existing_job_without_resubmission(c
         raise ToolFailure('response lost')
 
     chat.generation.generate = lost
-    chat.model.replies = [action('generate_3d_model', {'description': '生成花瓶'})]
+    chat.model.replies = [action('generate_3d_model', {'description': '  生成花瓶  '})]
     turn = await send(chat, '生成花瓶')
     assert turn['status'] == 'COMPLETED' and turn['jobId']
     assert len(calls) == len(store.list()) == 1
     await asyncio.wait_for(workflow.queue.join(), 3)
+
+
+@pytest.mark.parametrize('record_source', ['user', 'wrong-description', 'absent'])
+async def test_delegation_does_not_adopt_unrelated_job(chat_rig, record_source):
+    chat, (workflow, store, tools, _) = chat_rig
+    actual = chat.generation.generate
+    calls = []
+
+    async def inconsistent(description, key):
+        calls.append(key)
+        if record_source == 'user':
+            # A direct creation record owns the key, with identical user text.
+            store.create(description, 'THREE_D', None, key, prompt_source='user')
+            return await actual(description, key)
+        if record_source == 'wrong-description':
+            store.create('另一个小鸟', 'THREE_D', None, key)
+            raise ToolFailure('response lost')
+        return {'id': 'f' * 32, 'status': 'QUEUED'}
+
+    chat.generation.generate = inconsistent
+    description = '生成花瓶'
+    chat.model.replies = [action('generate_3d_model', {'description': description})]
+    turn = await send(chat, description)
+    assert turn['status'] == 'FAILED' and turn['jobId'] is None
+    assert not turn.get('delegation') and len(calls) == 1
+    next_turn = await send(chat, '聊聊花瓶的外观', turn['conversationId'], 'followup')
+    state = json.loads(chat.model.history[-1][0].content.split('\n', 1)[1])
+    assert next_turn['status'] == 'COMPLETED' and state['current_generation'] is None
+    assert len(calls) == 1 and workflow.queue.empty() and not tools.calls
+
+
+async def test_inconsistent_receipt_recovers_only_matching_durable_job(chat_rig):
+    chat, (workflow, store, tools, _) = chat_rig
+    actual = chat.generation.generate
+
+    async def incorrect_id(*args):
+        accepted = await actual(*args)
+        return {**accepted, 'id': 'f' * 32}
+
+    chat.generation.generate = incorrect_id
+    chat.model.replies = [action('generate_3d_model', {'description': '生成花瓶'})]
+    turn = await send(chat, '生成花瓶')
+    await asyncio.wait_for(workflow.queue.join(), 3)
+    assert turn['status'] == 'COMPLETED' and turn['jobId'] == store.list()[0]['id']
+    assert len(store.list()) == tools.calls['creative_generate_reference'] == 1
 
 
 async def test_restart_recovers_only_recorded_job_and_does_not_replay_model_or_mcp(chat_rig):
@@ -214,7 +259,11 @@ async def test_restart_recovers_only_recorded_job_and_does_not_replay_model_or_m
     await chat.close()
     interrupted, _ = chat.store.create('先聊天', None, 'interrupted')
     submitted, _ = chat.store.create('生成一个花瓶', None, 'submitted')
-    chat.store.update(submitted['id'], generationRequestKey='chat-' + submitted['id'])
+    collision, _ = chat.store.create('生成一只木雕鸟', None, 'collision')
+    collision_key = 'chat-' + collision['id']
+    chat.store.update(collision['id'], generationRequestKey=collision_key, generationPrompt=collision['message'])
+    store.create(collision['message'], 'THREE_D', None, collision_key, prompt_source='user')
+    chat.store.update(submitted['id'], generationRequestKey='chat-' + submitted['id'], generationPrompt=submitted['message'])
     job = await chat.generation.generate('生成一个花瓶', 'chat-' + submitted['id'])
     await asyncio.wait_for(workflow.queue.join(), 3)
     new_model = ConversationModel()
@@ -223,7 +272,9 @@ async def test_restart_recovers_only_recorded_job_and_does_not_replay_model_or_m
     try:
         assert restarted.store.get(interrupted['id'])['status'] == 'FAILED'
         assert restarted.store.get(submitted['id'])['jobId'] == job['id']
-        assert new_model.history == [] and len(store.list()) == 1
+        rejected = restarted.store.get(collision['id'])
+        assert rejected['status'] == 'FAILED' and rejected['jobId'] is None
+        assert new_model.history == [] and len(store.list()) == 2 and workflow.queue.empty()
     finally:
         await restarted.close()
 

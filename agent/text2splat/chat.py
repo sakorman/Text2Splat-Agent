@@ -128,12 +128,19 @@ class ChatAgent:
         return None
 
     def recover_job(self, turn):
-        if turn.get("generationRequestKey"):
-            try:
-                return self.workflow.store.by_request(turn["generationRequestKey"])
-            except KeyError:
-                pass
-        return None
+        key = "chat-" + turn["id"]
+        description = turn.get("generationPrompt")
+        if turn.get("generationRequestKey") != key or not isinstance(description, str) or not description.strip():
+            return None
+        try:
+            job = self.workflow.store.by_request(key)
+        except KeyError:
+            return None
+        # The compatibility API shares this journal; a matching key alone is not a delegation receipt.
+        if (job.get("mode") != "THREE_D" or job.get("promptSource") != "delegated" or job.get("parentJobId", "")
+                or job.get("prompt") != description.strip()):
+            return None
+        return job
 
     async def consume(self):
         while True:
@@ -200,8 +207,12 @@ class ChatAgent:
         # Persist intent before crossing the MCP boundary. Never retry this call on uncertainty.
         if turn.get("generationRequestKey"):
             raise ToolFailure("这条消息已经委派过生成，未重复提交")
-        self.store.update(turn["id"], generationRequestKey=key, generationPrompt=call["args"]["description"])
-        job = await self.generation.generate(call["args"]["description"], key)
+        description = call["args"]["description"]
+        turn = self.store.update(turn["id"], generationRequestKey=key, generationPrompt=description)
+        reply = await self.generation.generate(description, key)
+        job = self.recover_job(turn)
+        if not job or not isinstance(reply, dict) or reply.get("id") != job["id"]:
+            raise ToolFailure("生成回执与本轮任务记录不匹配，没有重复提交。")
         receipt = {"job_id": job["id"], "status": job["status"], "agent": "3d_react_specialist"}
         answer = "已交给生成助手开始制作。进度会显示在下方，你可以继续聊天。"
         self.store.update(turn["id"], status="COMPLETED", assistant=answer, jobId=job["id"],
