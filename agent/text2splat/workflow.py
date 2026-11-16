@@ -47,6 +47,12 @@ class ReviewRequired(ToolFailure):
 
 class Workflow:
     READS = {"creative_get_job", "webscan_get_status", "webscan_get_result"}
+    # The creative service uses the same ID for a completed job and its asset set.
+    SUBMISSIONS = {
+        "referenceRequest": ("reference", "referenceJobId", "referenceSetId"),
+        "viewsRequest": ("views", "viewsJobId", "viewsSetId"),
+        "trainRequest": ("train", "reconstructionId", "reconstructionId"),
+    }
     MAX_ROUNDS = 12
 
     def __init__(self, settings, store, tools, checkpointer, model=None):
@@ -356,8 +362,9 @@ class Workflow:
     async def submit_once(self, state, field, tool, arguments, lookup, id_field):
         self.check(state)
         jid = state["job_id"]
-        key = jid + {"referenceRequest": ":reference", "viewsRequest": ":views", "trainRequest": ":train"}[field]
-        if self.store.get(jid).get(field):
+        key = f"{jid}:{self.SUBMISSIONS[field][0]}"
+        job = self.store.get(jid)
+        if job.get(field):
             # Existing intent is evidence of a possible accepted mutation, never permission to repeat it.
             found = await self.tools.call(lookup, {"request_id": key})
             result = found.get("job")
@@ -366,8 +373,20 @@ class Workflow:
         else:
             self.store.update(jid, **{field: key})
             result = await self.tools.call(tool, {**arguments, "request_id": key})
+        # Persist the receipt even if cancellation or the deadline arrived during submission.
+        child = self.record_child(job, field, result.get(id_field))
         self.check(state)
-        return valid_id(result.get(id_field))
+        return child
+
+    def record_child(self, job, field, candidate):
+        child = valid_id(candidate)
+        _, saved_field, legacy_field = self.SUBMISSIONS[field]
+        saved = job.get(saved_field) or job.get(legacy_field)
+        if saved and saved != child:
+            raise ToolFailure("下游任务标识与已保存的提交记录不匹配")
+        if not job.get(saved_field):
+            self.store.update(job["id"], **{saved_field: child})
+        return child
 
     async def preflight(self, state):
         self.check(state)
@@ -444,7 +463,6 @@ class Workflow:
         self.stage(state, "RECONSTRUCTING", "queued", "等待本地重建")
         jid = await self.submit_once(state, "trainRequest", "webscan_start_reconstruction",
                                      {"session_id": state["session_id"]}, "webscan_get_request", "job_id")
-        self.store.update(state["job_id"], reconstructionId=jid)
         return {"reconstruction_id": jid}
 
     async def wait_reconstruction(self, state):
@@ -481,7 +499,7 @@ class Workflow:
     async def cleanup(self, jid):
         complete = True
         job = self.store.get(jid)
-        for field in ("referenceRequest", "viewsRequest", "trainRequest"):
+        for field in self.SUBMISSIONS:
             if not job.get(field):
                 continue
             train = field == "trainRequest"
@@ -489,9 +507,11 @@ class Workflow:
                 found = await self.tools.call("webscan_get_request" if train else "creative_get_request", {"request_id": job[field]})
                 if not isinstance(found, dict) or "job" not in found:
                     raise ToolFailure("查询返回格式异常")
-                if found["job"] is None:
+                if not isinstance(found["job"], dict):
                     raise ToolFailure("下游任务未找到，暂时无法确认已停止")
-                child = valid_id(found["job"].get("job_id" if train else "id"))
+                # Pin a recovered ID before cancellation so a lost acknowledgement
+                # cannot switch the target on the next cleanup attempt.
+                child = self.record_child(job, field, found["job"].get("job_id" if train else "id"))
                 cancelled = await self.tools.call(
                     "webscan_cancel_reconstruction" if train else "creative_cancel_job",
                     {"job_id": child},

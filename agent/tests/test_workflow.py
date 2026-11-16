@@ -312,6 +312,84 @@ async def test_missing_child_is_not_treated_as_confirmed_cleanup(rig):
     assert tools.calls["creative_cancel_job"] == 0
 
 
+@pytest.mark.parametrize("field,suffix,saved,child", [
+    ("referenceRequest", "reference", "referenceSetId", REF),  # Legacy completed reference
+    ("viewsRequest", "views", "viewsJobId", VIEWS),
+    ("trainRequest", "train", "reconstructionId", TRAIN),
+])
+async def test_cleanup_refuses_lookup_for_a_different_child(rig, field, suffix, saved, child):
+    workflow, store, tools, _ = rig
+    job, _ = store.create("一个花瓶", "THREE_D", None, "different-child")
+    jid, foreign = job["id"], "f" * 32
+    request = jid + ":" + suffix
+    id_field, cancel = ("job_id", "webscan_cancel_reconstruction") if field == "trainRequest" else ("id", "creative_cancel_job")
+    store.update(jid, **{field: request, saved: child}, cancelRequested=True, status="CANCELLING")
+    tools.requests[request] = {id_field: foreign}
+
+    await workflow.finish_cancel(jid)
+    assert store.get(jid)["status"] == "CANCELLING"
+    assert tools.calls[cancel] == 0
+
+    tools.requests[request] = {id_field: child}
+    await workflow.finish_cancel(jid)
+    assert store.get(jid)["status"] == "CANCELLED"
+    assert [args["job_id"] for name, args in tools.arguments if name == cancel] == [child]
+
+
+async def test_ambiguous_cancel_retry_cannot_switch_recovered_target(rig, monkeypatch):
+    workflow, store, tools, _ = rig
+    original = tools.call
+
+    async def lose_first_cancel_ack(name, args):
+        actual = await original(name, args)
+        if name == "creative_cancel_job" and tools.calls[name] == 1:
+            raise TemporaryToolFailure("取消结果未知")
+        return actual
+
+    monkeypatch.setattr(tools, "call", lose_first_cancel_ack)
+    tools.lose_response = True
+    job = await complete(workflow)
+    request = job["referenceRequest"]
+    assert job["status"] == "CANCELLING"
+    tools.requests[request] = {"id": "f" * 32}
+
+    workflow.cancel(job["id"])
+    await asyncio.wait_for(workflow.queue.join(), 2)
+    assert store.get(job["id"])["status"] == "CANCELLING"
+    assert [args["job_id"] for name, args in tools.arguments if name == "creative_cancel_job"] == [REF]
+    assert tools.calls["creative_generate_reference"] == 1
+
+    tools.requests[request] = {"id": REF}
+    workflow.cancel(job["id"])
+    await asyncio.wait_for(workflow.queue.join(), 2)
+    assert store.get(job["id"])["status"] == "CANCELLED"
+    assert [args["job_id"] for name, args in tools.arguments if name == "creative_cancel_job"] == [REF, REF]
+
+
+async def test_cancel_during_submit_preserves_the_confirmed_target(rig, monkeypatch):
+    workflow, store, tools, _ = rig
+    original = tools.call
+
+    async def swapped_lookup(name, args):
+        actual = await original(name, args)
+        if name == "creative_generate_reference":
+            tools.entered.set()
+            await tools.release.wait()
+        if name == "creative_get_request":
+            return {"job": {"id": "f" * 32}}
+        return actual
+
+    monkeypatch.setattr(tools, "call", swapped_lookup)
+    job = workflow.submit("青瓷花瓶", "THREE_D", None, "cancel-during-submit")
+    await asyncio.wait_for(tools.entered.wait(), 2)
+    workflow.cancel(job["id"])
+    tools.release.set()
+    await asyncio.wait_for(workflow.queue.join(), 2)
+
+    assert store.get(job["id"])["status"] == "CANCELLING"
+    assert tools.calls["creative_cancel_job"] == tools.calls["creative_generate_multiview"] == 0
+
+
 @pytest.mark.parametrize("read", ["creative_get_job", "webscan_get_status", "webscan_get_result"])
 async def test_only_transient_reads_recover(rig, read):
     workflow, _, tools, _ = rig
@@ -367,21 +445,25 @@ async def test_existing_intent_never_replays_mutation_even_if_lookup_is_empty(ri
     assert not tools.calls["creative_generate_reference"]
 
 
-async def test_restart_reads_legacy_records_without_reentering_graph(tmp_path):
+@pytest.mark.parametrize("mismatch", [False, True])
+async def test_restart_reads_legacy_records_without_reentering_graph(tmp_path, mismatch):
     directory = tmp_path / "workflows"
     directory.mkdir()
     jid = "f" * 32
     legacy = dict(id=jid, prompt="旧任务", mode="THREE_D", status="REFERENCE", createdAt="2026-10-31T00:00:00Z",
                   updatedAt="2026-10-31T00:00:00Z", requestKey="legacy", referenceRequest=jid + ":reference")
+    if mismatch:
+        legacy["referenceSetId"] = REF
     (directory / (jid + ".json")).write_text(json.dumps(legacy))
     store, tools = JobStore(tmp_path), FakeTools()
-    tools.requests[jid + ":reference"] = {"id": REF}
+    tools.requests[jid + ":reference"] = {"id": VIEWS if mismatch else REF}
     async with AsyncSqliteSaver.from_conn_string(str(tmp_path / "checkpoints.db")) as saver:
         workflow = Workflow(AgentSettings(data_dir=tmp_path), store, tools, saver)
         await workflow.start()
         await asyncio.wait_for(workflow.queue.join(), 2)
-        assert store.by_request("legacy")["status"] == "FAILED"
-        assert tools.calls == {"creative_get_request": 1, "creative_cancel_job": 1}
+        assert store.by_request("legacy")["status"] == ("CANCELLING" if mismatch else "FAILED")
+        assert tools.calls == ({"creative_get_request": 1} if mismatch else
+                               {"creative_get_request": 1, "creative_cancel_job": 1})
         assert await saver.aget_tuple({"configurable": {"thread_id": jid}}) is None
         await workflow.close()
     store.close()
