@@ -125,10 +125,10 @@ class Store:
         temp.write_text(json.dumps(data, ensure_ascii=False, indent=2))
         temp.replace(directory / "manifest.json")
 
-    def read_candidate(self, asset_id, index, asset):
-        """Read the same bounded PNG snapshot for review and for upload."""
+    def read_saved_image(self, asset_id, index, asset, *, label=None):
+        """Read a bounded PNG snapshot matching its saved manifest entry."""
         name = f"{index:02d}.png"
-        label = f"第 {index + 1} 张候选视图"
+        label = label or f"第 {index + 1} 张候选视图"
         if not isinstance(asset, dict) or asset.get("name") != name:
             raise ValueError(f"{label}的清单格式错误，未开始重建")
         expected = asset.get("file_sha256")

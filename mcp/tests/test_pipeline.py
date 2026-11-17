@@ -82,9 +82,22 @@ def test_restart_does_not_reissue_generation(setup):
     assert fake.calls == 0
 
 
-def test_full_image_pipeline_and_review_gate(setup):
+def test_full_image_pipeline_and_review_gate(setup, monkeypatch):
     settings, store, fake, creative = setup
     ref = completed_reference(creative, store)
+    expected_reference = (store.directory(ref) / "00.png").read_bytes()
+    image, review = fake.image, fake.review
+
+    def capture_image(prompt, reference):
+        assert reference == expected_reference
+        return image(prompt, reference)
+
+    def capture_review(reference, views):
+        assert reference == expected_reference
+        return review(reference, views)
+
+    monkeypatch.setattr(fake, "image", capture_image)
+    monkeypatch.setattr(fake, "review", capture_review)
     multi = creative.multiview(ref, "multi")
     creative.execute(*store.claim())
     result = store.get(multi["id"])
@@ -110,6 +123,47 @@ def test_cancel_during_image_response_never_starts_next_image(setup):
     creative.execute(*store.claim())
     assert fake.calls == 2
     assert store.get(job["id"])["status"] == "cancelled"
+
+
+@pytest.mark.parametrize("fault", ["replaced", "missing", "missing_digest", "wrong_filename", "cancelled"])
+def test_unverified_reference_never_starts_candidate_generation(setup, fault, monkeypatch):
+    _, store, fake, creative = setup
+    if fault == "cancelled":
+        save = store.save_manifest
+
+        def cancel_after_write(asset_id, manifest):
+            save(asset_id, manifest)
+            creative.cancel(asset_id)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(store, "save_manifest", cancel_after_write)
+            reference = creative.reference("一个青瓷花瓶", "ref")
+            creative.execute(*store.claim())
+        ref = reference["id"]
+        assert store.get(ref)["status"] == "cancelled"
+    else:
+        ref = completed_reference(creative, store)
+    multi = creative.multiview(ref, "multi")
+    file = store.directory(ref) / "00.png"
+    if fault == "replaced":
+        file.write_bytes(png(99))
+    elif fault == "missing":
+        file.unlink()
+    elif fault in {"missing_digest", "wrong_filename"}:
+        manifest = store.manifest(ref)
+        if fault == "missing_digest":
+            del manifest["assets"][0]["file_sha256"]
+        else:
+            # Even a byte-identical file is not the saved reference record.
+            file.rename(file.with_name("01.png"))
+            manifest["assets"][0]["name"] = "01.png"
+        store.save_manifest(ref, manifest)
+    calls_before = fake.calls
+    creative.execute(*store.claim())
+    result = store.get(multi["id"])
+    assert result["status"] == "failed" and "参考图" in result["message"]
+    assert fake.calls == calls_before and fake.reviews == 0
+    assert not result["assets"] and "asset_set_id" not in result
 
 
 @pytest.mark.parametrize("duplicate_at", [2, 7, 12])
