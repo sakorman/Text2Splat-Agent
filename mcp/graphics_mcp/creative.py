@@ -51,9 +51,17 @@ class Creative:
                 asset = self.store.save_image(jid, 0, raw)
                 manifest = {"kind": kind, "spec": spec, "assets": [asset], "provider": self.settings.image_provider}
             else:
-                reference = self.store.manifest(payload["reference_id"])
+                reference_id = payload["reference_id"]
+                state = self.store.get(reference_id)
+                if state["status"] != "succeeded" or state.get("asset_set_id") != reference_id:
+                    raise ValueError("参考图任务尚未成功，未生成候选视图")
+                reference = self.store.manifest(reference_id)
+                reference_assets = reference.get("assets")
+                if (reference.get("kind") != "reference" or not isinstance(reference_assets, list)
+                        or len(reference_assets) != 1 or reference_assets != state.get("assets")):
+                    raise ValueError("参考图清单与已完成任务不一致，未生成候选视图")
+                ref_raw = self.store.read_saved_image(reference_id, 0, reference_assets[0], label="参考图")
                 spec = reference["spec"]
-                ref_raw = (self.store.directory(payload["reference_id"]) / reference["assets"][0]["name"]).read_bytes()
                 assets, views = [], []
                 seen = {}
                 for index, angle in enumerate(ANGLES):
@@ -73,7 +81,7 @@ class Creative:
                                                   "已停止后续生成，未开始重建。请调整描述后重试。")
                         return
                     seen[digest] = index
-                    views.append(self.store.read_candidate(jid, index, assets[-1]))
+                    views.append(self.store.read_saved_image(jid, index, assets[-1]))
                     self.store.update(jid, assets=assets)
                 self.checkpoint(jid)
                 self.store.update(jid, stage="review", message="正在检查物件外观一致性")

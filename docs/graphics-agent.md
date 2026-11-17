@@ -90,7 +90,7 @@ Creative 与 Web-scan 两个服务只监听 loopback，使用 `/mcp` Streamable 
 
 1. `ZHIPU_TEXT_MODEL` 选定的模型（默认 `glm-4.7-flash`）输出固定规格 JSON：物件名称、形状、材质、纹理与结构。
 2. `cogview-3-flash` 根据规格生成一张参考图。概念模式在此完成。
-3. 3D 模式按同一规格逐张请求 12 个角度。每张保存后按归一化 RGB 像素摘要与已有候选图比较，完全重复即终止为 `needs_review`，指出重复的两张图、保留已有图片，不调用剩余生图或外观审核，不发布可导入集合、不自动补图。仅调整编码或 PNG 元数据不能绕过检查；此处不判断近似重复或几何一致性。CogView 不接收参考图，因此完成的清单明确记录 `reference_conditioned=false`、`geometry_verified=false`。
+3. 3D 模式开始前，Creative MCP 核对参考图已成功完成、清单与任务记录一致，并验证保存的 PNG 文件摘要。参考图缺失、被替换或尚未成功时停止，旧记录缺少摘要时需重新生成。随后按同一规格逐张请求 12 个角度。每张保存后按归一化 RGB 像素摘要与已有候选图比较，完全重复即终止为 `needs_review`，指出重复的两张图、保留已有图片，不调用剩余生图或外观审核，不发布可导入集合、不自动补图。仅调整编码或 PNG 元数据不能绕过去重；此处不判断近似重复或几何一致性。CogView 不接收参考图，因此完成的清单明确记录 `reference_conditioned=false`、`geometry_verified=false`。
 4. `glm-4.6v-flash` 接收参考图及保存后的候选 PNG 的缩略图，检查明显结构差异、拼图和视角变化。格式异常或判断不一致时，不开始重建。
 5. Web-scan MCP 在创建采集或上传前逐张核对文件名和 PNG 文件的 `file_sha256`，只上传已核对的字节。摘要缺失、内容改变或文件不可读时停止；不替旧集合补写摘要。此检查与归一化像素去重分开。web-scan 再验证不同照片数量与像素数据，并冻结采集。COLMAP 估计相机，Brush 用实际估计结果训练。
 6. 真实训练成功后，Web-scan MCP 读取 PLY 的前 16 KiB（小文件读取到文件末尾），验证 Gaussian 字段和二进制顶点布局，按文件头和顶点记录计算总大小，并与 HTTP `Content-Range` 及清单核对。Agent 只在匹配当前任务、采集且带有有效 `ply_vertex_count` 的结果上进入 `READY`。旧 MCP 缺少该字段时应更新并重启；已有任务记录不回填。

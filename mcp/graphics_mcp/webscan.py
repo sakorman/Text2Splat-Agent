@@ -61,7 +61,7 @@ class Webscan:
                     raise ValueError("已导入的采集不再处于冻结状态，未开始重建")
             if capture is None or capture["status"] != "ready":
                 # Validate every local file before any upload and send these same bytes.
-                snapshots = [self.store.read_candidate(asset_set_id, i, asset) for i, asset in enumerate(images)]
+                snapshots = [self.store.read_saved_image(asset_set_id, i, asset) for i, asset in enumerate(images)]
                 if capture is None:
                     session = self.request("POST", "/api/sessions", json={"name": manifest["spec"]["title"][:80]})
                     session_id = valid_id(session["id"])
