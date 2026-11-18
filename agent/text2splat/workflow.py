@@ -10,6 +10,8 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from pydantic import ValidationError
 
+from graphics_mcp.webscan import RECONSTRUCTION_REJECTION_CODES
+
 from .react import ACTIONS, ReActModel
 from .context import prepare_context
 from .memory import MemoryStore
@@ -507,6 +509,14 @@ class Workflow:
                 found = await self.tools.call("webscan_get_request" if train else "creative_get_request", {"request_id": job[field]})
                 if not isinstance(found, dict) or "job" not in found:
                     raise ToolFailure("查询返回格式异常")
+                rejection = found.get("rejection")
+                if (train and found["job"] is None and not job.get("reconstructionId")
+                        and job.get("sessionId") and isinstance(rejection, dict)
+                        and rejection.get("request_id") == job[field]
+                        and rejection.get("session_id") == job["sessionId"]
+                        and type(rejection.get("http_status")) is int
+                        and rejection["http_status"] in RECONSTRUCTION_REJECTION_CODES):
+                    continue  # This exact request was refused before a training job was created.
                 if not isinstance(found["job"], dict):
                     raise ToolFailure("下游任务未找到，暂时无法确认已停止")
                 # Pin a recovered ID before cancellation so a lost acknowledgement

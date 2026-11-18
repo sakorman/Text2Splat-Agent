@@ -19,6 +19,7 @@ class ReconstructionService:
         self.jobs, self.posts, self.cancelled = [], [], []
         self.response_mode = "accepted_then_timeout"
         self.response_changes = {}
+        self.reject_status = None
         self.submitted = None
         self.client = httpx.Client(base_url=self.settings.webscan_url, transport=httpx.MockTransport(self.respond))
 
@@ -32,6 +33,8 @@ class ReconstructionService:
         if request.method == "POST" and request.url.path == "/api/jobs":
             payload = json.loads(request.content)
             self.posts.append(payload)
+            if self.reject_status is not None:
+                return httpx.Response(self.reject_status, json={"detail": "private server diagnostic"})
             self.submitted = {"id": self.job_id, "session_id": self.session_id, "status": "queued",
                               "config": {k: v for k, v in payload.items() if k != "session_id"}}
             if self.response_mode != "timeout_before_commit":
@@ -115,6 +118,31 @@ def test_unknown_start_never_reposts_even_before_the_job_becomes_visible(service
     service.jobs.append(service.submitted)
     assert service.adapter().start(service.session_id, "request")["job_id"] == service.job_id
     assert len(service.posts) == 1
+
+
+@pytest.mark.parametrize("status", [409, 422])
+def test_rejected_submission_stays_rejected_across_restart(service, status):
+    service.reject_status = status
+    with pytest.raises(ValueError, match=f"HTTP {status}"):
+        service.adapter().start(service.session_id, "request")
+    assert not service.jobs
+
+    # Even a later, identical submission by another caller cannot satisfy this request.
+    service.jobs.append({"id": service.job_id, "session_id": service.session_id, "status": "queued",
+                         "config": {k: v for k, v in service.posts[0].items() if k != "session_id"}})
+    rejection = service.adapter().by_request("request")
+    assert rejection.get("rejected_http_status") == status and "job_id" not in rejection
+    with pytest.raises(ValueError, match=f"HTTP {status}"):
+        service.adapter().start(service.session_id, "request")
+    assert len(service.posts) == 1 and not service.cancelled
+
+
+def test_server_error_is_still_uncertain(service):
+    service.reject_status = 503
+    lose_start_response(service)
+    with pytest.raises(ValueError, match="未知"):
+        service.adapter().by_request("request")
+    assert "rejected_http_status" not in service.store.link("train:request")
 
 
 @pytest.mark.parametrize("operation", ["start", "lookup"])

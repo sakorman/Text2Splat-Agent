@@ -87,8 +87,12 @@ def create_server(kind, settings, port):
 
         @tool
         def webscan_get_request(request_id: str) -> dict:
-            """Recover the reconstruction ID after a lost submit response."""
-            return {"job": scan.by_request(request_id)}
+            """Read the saved reconstruction job or a confirmed rejection, without submitting again."""
+            linked = scan.by_request(request_id)
+            if linked and "rejected_http_status" in linked:
+                return {"job": None, "rejection": {"request_id": request_id, "session_id": linked["session_id"],
+                                                   "http_status": linked["rejected_http_status"]}}
+            return {"job": linked}
 
         @tool
         def webscan_get_result(job_id: str) -> dict:

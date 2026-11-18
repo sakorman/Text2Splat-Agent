@@ -10,10 +10,18 @@ from .store import Store, valid_id
 RECONSTRUCTION_CONFIG = {"backend": "brush", "steps": 3000, "resolution": 512, "max_points": 150000,
                          "camera_mode": "auto", "evaluation_mode": "all"}
 TEMPORARY_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+RECONSTRUCTION_REJECTION_CODES = frozenset({409, 422})
 
 
 class TemporaryWebscanError(ValueError):
     """Temporary availability failure; callers must not replay mutations."""
+
+
+class RejectedReconstruction(ValueError):
+    def __init__(self, status):
+        self.status = status
+        hint = "请检查采集是否已冻结" if status == 409 else "请检查本机 Brush 和训练参数"
+        super().__init__(f"web-scan 返回 HTTP {status}，未接受训练；{hint}")
 
 
 class Webscan:
@@ -28,8 +36,12 @@ class Webscan:
             response.raise_for_status()
             return response.json()
         except httpx.HTTPStatusError as exc:
-            error = TemporaryWebscanError if exc.response.status_code in TEMPORARY_STATUS_CODES else ValueError
-            raise error(f"web-scan 返回 HTTP {exc.response.status_code}，请检查本地服务及输入照片") from None
+            status = exc.response.status_code
+            if method == "POST" and path == "/api/jobs" and status in RECONSTRUCTION_REJECTION_CODES:
+                # The local API returns these codes before adding a training job.
+                raise RejectedReconstruction(status) from None
+            error = TemporaryWebscanError if status in TEMPORARY_STATUS_CODES else ValueError
+            raise error(f"web-scan 返回 HTTP {status}，请检查本地服务及输入照片") from None
         except httpx.RequestError:
             raise TemporaryWebscanError("无法连接本地 web-scan，请启动服务后重试；不会切换云端 GPU") from None
         except ValueError:
@@ -115,6 +127,8 @@ class Webscan:
             if linked:
                 # A durable submit intent means the POST may already have happened.
                 # Repeated tool calls may only reconcile it, never send another POST.
+                if "rejected_http_status" in linked:
+                    raise RejectedReconstruction(linked["rejected_http_status"])
                 return self.by_request(request_id)
             session = self.request("GET", f"/api/sessions/{session_id}")
             existing = self.matching_job(session, session_id, config)
@@ -123,8 +137,13 @@ class Webscan:
             else:
                 if any(j.get("status") in {"queued", "running"} for j in session["jobs"]):
                     raise ValueError("该采集已有其他参数的重建任务运行中，未启动新的训练")
-                self.store.link(key, {"session_id": session_id, "config": config})
-                job = self.request("POST", "/api/jobs", json={"session_id": session_id, **config})
+                intent = {"session_id": session_id, "config": config}
+                self.store.link(key, intent)
+                try:
+                    job = self.request("POST", "/api/jobs", json={"session_id": session_id, **config})
+                except RejectedReconstruction as exc:
+                    self.store.link(key, {**intent, "rejected_http_status": exc.status})
+                    raise
                 if not isinstance(job, dict) or job.get("session_id") != session_id or job.get("config") != config:
                     raise ValueError("重建返回的采集或参数不匹配，提交结果仍未知")
                 jid = job["id"]
@@ -160,7 +179,7 @@ class Webscan:
         with self.lock:
             key = "train:" + request_id
             linked = self.store.link(key)
-            if linked and not linked.get("job_id"):
+            if linked and not linked.get("job_id") and "rejected_http_status" not in linked:
                 sid = valid_id(linked["session_id"])
                 # Older intents used this same fixed preset without storing it.
                 config = linked.get("config", RECONSTRUCTION_CONFIG)
