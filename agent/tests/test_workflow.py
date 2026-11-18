@@ -312,6 +312,34 @@ async def test_missing_child_is_not_treated_as_confirmed_cleanup(rig):
     assert tools.calls["creative_cancel_job"] == 0
 
 
+@pytest.mark.parametrize("receipt", ["confirmed", "wrong-request", "wrong-session", "known-child"])
+async def test_only_matching_rejection_can_close_unknown_training(rig, monkeypatch, receipt):
+    workflow, store, tools, _ = rig
+    original = tools.call
+
+    async def reject_train(name, args):
+        if name == "webscan_start_reconstruction":
+            await original(name, args)
+            if receipt == "known-child":
+                store.update(args["request_id"].split(":")[0], reconstructionId=TRAIN)
+            raise ToolFailure("web-scan 返回 HTTP 409，未接受训练")
+        if name == "webscan_get_request":
+            await original(name, args)
+            return {"job": None, "rejection": {
+                "http_status": 409,
+                "request_id": "wrong" if receipt == "wrong-request" else args["request_id"],
+                "session_id": "f" * 32 if receipt == "wrong-session" else SESSION,
+            }}
+        return await original(name, args)
+
+    monkeypatch.setattr(tools, "call", reject_train)
+    job = await complete(workflow)
+    assert job["status"] == ("FAILED" if receipt == "confirmed" else "CANCELLING")
+    assert "HTTP 409" in job["message"] and "result" not in job
+    assert tools.calls["webscan_start_reconstruction"] == 1
+    assert tools.calls["webscan_cancel_reconstruction"] == tools.calls["webscan_get_result"] == 0
+
+
 @pytest.mark.parametrize("field,suffix,saved,child", [
     ("referenceRequest", "reference", "referenceSetId", REF),  # Legacy completed reference
     ("viewsRequest", "views", "viewsJobId", VIEWS),
