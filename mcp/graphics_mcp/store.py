@@ -1,3 +1,4 @@
+from contextlib import closing, contextmanager
 import hashlib
 import io
 import json
@@ -26,7 +27,7 @@ class Store:
         self.assets = root / "assets"
         self.assets.mkdir(parents=True, exist_ok=True)
         self.database = root / "mcp.sqlite3"
-        with self.connect() as db:
+        with self.transaction() as db:
             db.executescript("""
                 PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS jobs (
@@ -40,11 +41,17 @@ class Store:
         db.row_factory = sqlite3.Row
         return db
 
+    @contextmanager
+    def transaction(self):
+        # SQLite's context manager ends the transaction but leaves the connection open.
+        with closing(self.connect()) as db, db:
+            yield db
+
     def submit(self, key, kind, payload):
         if not isinstance(key, str) or not 1 <= len(key) <= 160:
             raise ValueError("无效请求标识")
         encoded = json.dumps(payload, sort_keys=True)
-        with self.connect() as db:
+        with self.transaction() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT * FROM jobs WHERE request_key=?", (key,)).fetchone()
             if row:
@@ -60,19 +67,19 @@ class Store:
             return state
 
     def get(self, jid):
-        with self.connect() as db:
+        with self.transaction() as db:
             row = db.execute("SELECT state FROM jobs WHERE id=?", (valid_id(jid),)).fetchone()
         if row is None:
             raise ValueError("任务不存在")
         return json.loads(row[0])
 
     def by_request(self, request_id):
-        with self.connect() as db:
+        with self.transaction() as db:
             row = db.execute("SELECT state FROM jobs WHERE request_key=?", (request_id,)).fetchone()
         return json.loads(row[0]) if row else None
 
     def update(self, jid, **fields):
-        with self.connect() as db:
+        with self.transaction() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT state FROM jobs WHERE id=?", (valid_id(jid),)).fetchone()
             if row is None:
@@ -85,13 +92,13 @@ class Store:
             return state
 
     def recover(self):
-        with self.connect() as db:
+        with self.transaction() as db:
             ids = [r[0] for r in db.execute("SELECT id FROM jobs WHERE json_extract(state,'$.status') IN ('queued','running')")]
         for jid in ids:
             self.update(jid, status="failed", stage="interrupted", message="服务重启，生成已中断。请创建新版本；不会自动重发模型请求。")
 
     def claim(self):
-        with self.connect() as db:
+        with self.transaction() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT * FROM jobs WHERE json_extract(state,'$.status')='queued' ORDER BY created LIMIT 1").fetchone()
             if not row:
@@ -102,7 +109,7 @@ class Store:
             return row["id"], row["kind"], json.loads(row["payload"])
 
     def link(self, key, value=None):
-        with self.connect() as db:
+        with self.transaction() as db:
             if value is not None:
                 db.execute("INSERT OR REPLACE INTO links VALUES(?,?)", (key, json.dumps(value)))
                 return value

@@ -620,3 +620,22 @@ web-scan 尚未提供原生请求幂等键，不能将“唯一采集与参数�
 - 阅读 [RF3DGS v2 §3](https://arxiv.org/html/2611.13772v2#S3)（2026-11-10 首发，2026-11-11 修订，检索时 v2）：使用单相机视频的多视角图和深度重投影拆分反射；独立生成的候选视图没有已知可靠的点对应。未移植该损失、下载权重或改变相机估计。
 
 旧实现复现三项失败：两种明确拒绝可在重启后误认后来任务，以及明确拒绝留下持续取消状态。修复后 364 项 Python、11 项 Node 测试通过，覆盖拒绝、标识冲突、已有训练 ID、503 和不重发。另使用真实 Web-scan 路由、临时 SQLite 和 MCP SDK 内存连接，分别模拟未冻结与 Brush 不可用：各只有一次训练提交，重建 MCP 实例后能读回拒绝，采集中没有训练任务。未调用外部模型、运行 Brush 训练或下载权重。生成图多视角一致性与完整 3D 质量仍待实际样例验收。
+## 2026-11-19：MCP 每次数据库操作结束后立即释放连接
+
+开始时工作区干净，无适用的 AGENTS.md；本地 `codex/local-graphics-agent` 与用户仓库两条分支均为 `90e5422`，对应 CI 成功。Creative 工作进程每 250 ms 领取一次队列任务，即使队列为空也打开 SQLite 连接。此前所有 Store 操作的 `with self.connect()` 只结束事务，连接要等垃圾回收释放；常驻轮询因此存在不必要的文件描述符积累。
+
+- 用 `contextlib.closing` 包住原生 SQLite 事务上下文，统一覆盖初始化、提交、查询、更新、恢复、领取和 Web-scan 回执映射。提交、回滚或提前返回之后立即关闭；事务正文或提交本身失败时也关闭并传播异常。保留原 `connect()` 接口、30 秒锁等待、`BEGIN IMMEDIATE`、数据库结构和幂等语义。聊天和长期记忆的连接已有显式关闭，本轮只改 MCP Store。
+
+### 来源与取舍
+
+检索和阅读日期：2026-11-19。
+
+- 核对 [Python 3.12 官方 SQLite 上下文说明](https://docs.python.org/3.12/library/sqlite3.html#how-to-use-the-connection-context-manager)：事务上下文不关闭连接，文档建议用 `contextlib.closing`。阅读用户 [Web-scan 的连接管理源码](https://github.com/sakorman/web-scan/blob/c5d55af880ec593c6eeeebbf328c8f8544ba6c2b/webscan/store.py) 与[连接生命周期报告](https://github.com/sakorman/web-scan/blob/c5d55af880ec593c6eeeebbf328c8f8544ba6c2b/docs/CONNECTION-LIFETIME.md)（2026-11-18 提交）；对本项目独立复现后采用同一标准库做法，没有引入连接池或调整系统资源限制。
+- [Deep Agents 0.7.40](https://github.com/langchain-ai/deepagents/releases/tag/deepagents%3D%3D0.7.40) 于 2026-11-18 18:27 UTC 发布。阅读其中 [#5907 的 shell 清理源码](https://github.com/langchain-ai/deepagents/pull/5907/files)（2026-11-16 合并），它显式终止和回收取消后的进程，并限制等待清理的时间。该实现处理 shell 而非 SQLite，本项目不依赖 Deep Agents 的 shell 后端；仅用作检查异常路径资源释放的参考，不更换框架或升级依赖。
+- 阅读 [BoundedGS §3.1、§3.4、§4.1](https://arxiv.org/html/2610.34233v1)（2026-10-25 首发，检索时仅 v1）：分别控制渲染中间状态和图像队列的存活范围，实验使用 RTX 4090。它不能直接作为 Apple Silicon / Brush 的性能结论，本轮未移植算法。核对用户 [Web-scan 2026-11-19 的六次重建报告](https://github.com/sakorman/web-scan/blob/1129749210d742107a4dabb843d3cc5e1fda4bf2/docs/REPEATABILITY.md)：同配置仍有逐次与逐视角波动，不能凭数据库资源改进声称画质提高。保留当前训练预设和几何门槛。
+
+### 验证与后续
+
+- 在修改前，6 项针对现有 Store 操作的连接释放回归失败；另增加事务正文异常和提交时延迟外键约束失败两项测试。测试保留原生连接对象，避免因垃圾回收而误判关闭；覆盖空队列、幂等返回、错误参数、终态保护、持久化回执和新 Store 实例的重启恢复。8 项新增测试及全量 **372 项 Python、11 项 Node** 测试通过，依赖、浏览器脚本语法和 Git 差异检查通过。复现命令：`.venv/bin/python -m pytest -c pytest.ini -q mcp/tests/test_store_connections.py`。
+- 在本机 Python 3.12.14 / SQLite 3.53.1 上，用独立临时 WAL 数据库执行 100 次空 `claim()`。只在探针进程暂停自动垃圾回收，`lsof -a -p <pid> -Ffn` 只计该库的数字文件描述符：修改前为 `0 → 201 → 0`，修改后为 `0 → 0 → 0`，依次为轮询前、轮询后和显式回收后。旧版最终也能回收，这是延迟释放问题；压力条件不代表生产常驻数量，也未证明已有服务故障的根因、吞吐收益或 GPU 内存收益。
+- 本轮没有调用模型 API、下载权重、运行真实重建或重启常驻服务。测试用临时存储，数据库资源验证不等于文字到 3D 的质量验收。后续仍需在既有授权内独立验证真实生成视图的几何一致性及本机重建产物。
