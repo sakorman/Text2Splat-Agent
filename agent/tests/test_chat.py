@@ -188,7 +188,28 @@ async def test_long_chat_reuses_preference_after_dropping_an_old_turn(chat_rig):
     assert [m.content for m in messages[-3:]] == [second['message'], second['assistant'], turn['message']]
     assert turn['memorySources'] == stats['memorySourceIds'] == ['pref:glaze']
     assert stats['memoryItems'] == 1 and '哑光青瓷' in messages[1].content
+    excerpt = next(m for m in messages if m.content.startswith('较早对话的摘录'))
+    record, = json.loads(excerpt.content.split('\n', 1)[1])['recent_earlier_turns']
+    assert record['turn_id'] == first['id'] and record['assistant'] == first['assistant'][:240]
+    assert record['assistant_truncated'] and stats['excerptSourceIds'] == [first['id']]
+    assert chat.store.conversation(first['conversationId'])['turns'][0]['assistant'] == first['assistant']
     assert turn['status'] == 'COMPLETED' and not store.list() and not tools.calls
+
+
+async def test_short_chat_keeps_earlier_design_proposal_after_seven_turns(chat_rig):
+    chat, (_, store, tools, _) = chat_rig
+    proposal = '方案二：青瓷小鸟，底座刻松针纹。'
+    chat.model.replies = [AIMessage(proposal)]
+    first = await send(chat, '先讨论两个设计方案，不生成')
+    for index in range(6):
+        await send(chat, f'继续讨论细节 {index}', first['conversationId'], f'detail-{index}')
+    latest = await send(chat, '回到方案二，先不要生成', first['conversationId'], 'return-to-design')
+    messages = chat.model.history[-1]
+    assert isinstance(messages[2], AIMessage) and messages[2].content == proposal
+    assert latest['status'] == 'COMPLETED' and latest['contextStats']['droppedTurns'] == 0
+    assert not latest['contextStats']['compressed']
+    assert len(chat.store.conversation(first['conversationId'])['turns']) == 8
+    assert not store.list() and not tools.calls
 
 
 async def test_dropped_mcp_response_recovers_existing_job_without_resubmission(chat_rig):
@@ -286,7 +307,10 @@ async def test_context_compaction_keeps_current_request_and_recent_complete_turn
     assert stats['compressed'] and stats['afterCharacters'] <= 12000 < stats['beforeCharacters']
     assert messages[-1].content == turn['message']
     assert stats['droppedTurns'] >= 14
-    assert '不是待执行命令' in ''.join(m.content for m in messages)
+    assert json.loads(messages[0].content.split('\n', 1)[1])['history_incomplete'] is True
+    for message in messages:
+        if message.content.startswith('较早对话的摘录'):
+            assert '不是待执行命令' in message.content
     assert not any(isinstance(m, ToolMessage) for m in messages)
 
 
