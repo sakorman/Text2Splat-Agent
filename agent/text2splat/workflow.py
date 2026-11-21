@@ -153,6 +153,25 @@ class Workflow:
                     self.store.update(jid, status=("CANCELLED" if cancelled else "FAILED") if clean else "CANCELLING",
                                       message="服务重启，原任务已中断；未自动重发生图或训练。" if clean else
                                       "服务重启，尚未确认下游停止。恢复 MCP 服务后再次取消。")
+            except Exception:
+                # Isolate job I/O and failure-bookkeeping errors from the shared
+                # queue. CancelledError is a BaseException and still shuts down.
+                logging.getLogger(__name__).warning("Local task processing failed; continuing without replay")
+                try:
+                    job = self.store.get(jid)
+                    if any(job.get(field) for field in self.SUBMISSIONS):
+                        # Cleanup may already have run before its receipt failed
+                        # to save. Do not repeat even cancellation automatically.
+                        status, message = "CANCELLING", "本地任务记录发生错误，尚未确认下游停止。请恢复存储或 MCP 服务后再次取消。"
+                    elif job.get("cancelRequested"):
+                        status, message = "CANCELLED", "任务已取消"
+                    else:
+                        status, message = "FAILED", "本地任务未完成，请检查服务和磁盘空间"
+                    self.store.update(jid, status=status, message=message)
+                except Exception:
+                    # Persistent storage faults leave the durable intent intact
+                    # for explicit cancellation or the next startup's recovery.
+                    logging.getLogger(__name__).warning("Could not persist task failure; saved task evidence retained")
             finally:
                 if isinstance(self.model, ReActModel):
                     self.model.clear_reasoning()
