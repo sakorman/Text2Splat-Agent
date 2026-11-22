@@ -7,8 +7,10 @@ from text2splat.memory import MemoryStore
 
 def episode(jid="a" * 32, prompt="青瓷花瓶", status="READY"):
     return dict(id=jid, prompt=prompt, mode="THREE_D", status=status, referenceSetId="b" * 32,
+                reconstructionId="c" * 32, sessionId="d" * 32,
                 spec={"title": prompt}, updatedAt="2026-11-02T00:00:00Z",
-                result={"viewer_url": "http://127.0.0.1/private", "files": [
+                result={"job_id": "c" * 32, "session_id": "d" * 32, "ply_vertex_count": 1,
+                        "viewer_url": "http://127.0.0.1/private", "files": [
                     {"name": "gaussians.ply", "bytes": 100, "url": "http://127.0.0.1/private.ply"}]})
 
 

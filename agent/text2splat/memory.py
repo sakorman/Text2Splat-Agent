@@ -11,6 +11,34 @@ from .store import now, valid_id
 STOP = {"一个", "生成", "模型", "测试", "物件", "希望", "想要", "请帮", "创建", "任务", "这个",
         "记住", "我的", "偏好", "喜欢", "以后",
         "the", "a", "an", "create", "generate", "model", "please", "test", "remember", "that", "i", "prefer", "like"}
+VERIFICATION_VERSION = 1
+
+
+def verified_receipt(job):
+    """Check saved header-check evidence, not present file availability or geometry."""
+    result = job.get("result")
+    if job.get("mode") != "THREE_D" or not isinstance(result, dict):
+        return False
+    for saved, receipt in (("reconstructionId", "job_id"), ("sessionId", "session_id")):
+        try:
+            identifier = valid_id(job.get(saved))
+        except ValueError:
+            return False
+        if result.get(receipt) != identifier:
+            return False
+    count, files = result.get("ply_vertex_count"), result.get("files")
+    return (type(count) is int and count > 0 and isinstance(files, list) and any(
+        isinstance(f, dict) and f.get("name") == "gaussians.ply" and f.get("url")
+        and isinstance(f.get("bytes"), (int, float)) and f["bytes"] > 0 for f in files))
+
+
+def readable_item(item):
+    # Older rows inferred verification from a filename alone. Keep the archive
+    # intact, but do not repeat that claim until reindexing checks its source.
+    if (item.get("kind") == "episode" and item.get("verification_version") != VERIFICATION_VERSION
+            and (item.get("artifact_verified") or item.get("outcome") == "verified_3d")):
+        return {**item, "artifact_verified": False, "outcome": "unverified_3d"}
+    return item
 
 
 def terms(text):
@@ -48,7 +76,7 @@ class MemoryStore:
         if not 1 <= limit <= 100 or offset < 0:
             raise ValueError("记忆分页参数无效")
         with self.connection() as db:
-            return [json.loads(r[0]) for r in db.execute(
+            return [readable_item(json.loads(r[0])) for r in db.execute(
                 "SELECT payload FROM memories ORDER BY updated_at DESC, id LIMIT ? OFFSET ?", (limit, offset))]
 
     def set_preference(self, key, value, *, source_job_id=None, evidence=None, source_turn_id=None):
@@ -94,11 +122,7 @@ class MemoryStore:
         if not job.get("referenceSetId") and not job.get("agentFailure"):
             return False
         jid = valid_id(job["id"])
-        result = job.get("result") or {}
-        verified = status == "READY" and any(
-            isinstance(f, dict) and f.get("name") == "gaussians.ply" and f.get("url")
-            and isinstance(f.get("bytes"), (int, float)) and f["bytes"] > 0
-            for f in result.get("files", []))
+        verified = status == "READY" and verified_receipt(job)
         if status == "READY" and not verified:
             return False
         outcome = "verified_3d" if verified else "concept_only" if status == "CONCEPT_READY" else status.lower()
@@ -108,19 +132,22 @@ class MemoryStore:
                     title=clipped((job.get("spec") or {}).get("title"), 80),
                     review=clipped(review.get("reason"), 300),
                     failure=clipped((job.get("agentFailure") or {}).get("message"), 400),
-                    artifact_verified=verified, updated_at=job.get("updatedAt") or now())
+                    artifact_verified=verified, verification_version=VERIFICATION_VERSION,
+                    updated_at=job.get("updatedAt") or now())
         with self.connection() as db:
-            cursor = db.execute("INSERT OR IGNORE INTO memories SELECT ?,?,?,?,? "
-                                "WHERE NOT EXISTS (SELECT 1 FROM forgotten WHERE id=?)",
+            cursor = db.execute("INSERT INTO memories SELECT ?,?,?,?,? "
+                                "WHERE NOT EXISTS (SELECT 1 FROM forgotten WHERE id=?) "
+                                "ON CONFLICT(id) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at "
+                                "WHERE json_extract(memories.payload,'$.verification_version') IS NOT ?",
                                 (item["id"], "episode", json.dumps(item, ensure_ascii=False),
-                                 item["updated_at"], item["updated_at"], item["id"]))
+                                 item["updated_at"], item["updated_at"], item["id"], VERIFICATION_VERSION))
         return cursor.rowcount == 1
 
     def recall(self, prompt, exclude_job_id=None):
         with self.connection() as db:
             preferences = [json.loads(r[0]) for r in db.execute(
                 "SELECT payload FROM memories WHERE kind='preference' ORDER BY updated_at DESC, id LIMIT 4")]
-            episodes = [json.loads(r[0]) for r in db.execute(
+            episodes = [readable_item(json.loads(r[0])) for r in db.execute(
                 "SELECT payload FROM memories WHERE kind='episode' ORDER BY updated_at DESC, id LIMIT 300")]
         query, ranked = terms(prompt), []
         for episode in episodes:
