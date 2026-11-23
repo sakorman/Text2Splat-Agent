@@ -418,6 +418,8 @@ class Workflow:
         provider = await self.tools.call("creative_health", {})
         if not provider.get("configured"):
             raise ToolFailure("请在本地 .env 配置 ZHIPU_API_KEY 并重启 MCP 服务")
+        if provider.get("worker_running") is False:
+            raise ToolFailure("图片 MCP 工作线程未运行，请重启 Creative MCP 服务后再生成")
         self.check(state)
         self.store.update(state["job_id"], provider=provider)
         return {}

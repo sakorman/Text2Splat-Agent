@@ -1,3 +1,4 @@
+import logging
 import threading
 
 from .providers import ANGLES, ProviderError, Providers
@@ -14,9 +15,11 @@ class Creative:
         self.settings, self.store = settings, store
         self.providers = providers or Providers(settings)
         self.stop = threading.Event()
+        self.thread = None
 
     def health(self):
         return {"configured": bool(self.settings.zhipu_key), "image_provider": self.settings.image_provider,
+                "worker_running": self.thread is not None and self.thread.is_alive() and not self.stop.is_set(),
                 "paid_enabled": self.settings.allow_paid, "reference_conditioned": self.settings.image_provider == "seedream",
                 "text_model": self.settings.text_model, "vision_model": "glm-4.6v-flash",
                 "image_model": "cogview-3-flash" if self.settings.image_provider == "cogview" else "doubao-seedream-4-0-250828"}
@@ -110,10 +113,25 @@ class Creative:
         self.store.recover()
         def run():
             while not self.stop.is_set():
-                task = self.store.claim()
-                if task:
-                    self.execute(*task)
-                else:
+                task = None
+                try:
+                    task = self.store.claim()
+                    if task:
+                        self.execute(*task)
+                    else:
+                        self.stop.wait(0.25)
+                except Exception:
+                    # A claim may have committed before its acknowledgement was
+                    # lost. Only poll for queued work; never replay a running job.
+                    logging.getLogger(__name__).warning("Image worker operation failed; continuing without replay")
+                    if task:
+                        try:
+                            self.store.update(task[0], status="failed",
+                                              message="本地生成处理未完成，请检查服务与存储；没有自动重发模型请求。")
+                        except Exception:
+                            logging.getLogger(__name__).warning("Could not persist image task failure; saved task retained")
+                    # Back off even if the database stays unavailable; shutdown
+                    # can interrupt this wait. Startup recovery still fails fast.
                     self.stop.wait(0.25)
         self.thread = threading.Thread(target=run, name="creative-worker", daemon=True)
         self.thread.start()

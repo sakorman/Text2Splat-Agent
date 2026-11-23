@@ -138,6 +138,22 @@ async def test_concept_does_not_enter_3d_nodes(rig):
     assert not tools.calls["creative_generate_multiview"] and not tools.calls["webscan_health"]
 
 
+@pytest.mark.parametrize("mode", ["CONCEPT", "THREE_D"])
+async def test_preflight_rejects_inactive_image_worker_before_model_or_generation(rig, monkeypatch, mode):
+    workflow, _, tools, _ = rig
+    original = tools.call
+
+    async def inactive_worker(name, args):
+        result = await original(name, args)
+        return {**result, "worker_running": False} if name == "creative_health" else result
+
+    monkeypatch.setattr(tools, "call", inactive_worker)
+    job = await complete(workflow, mode=mode)
+    assert job["status"] == "FAILED" and "工作线程" in job["message"]
+    assert not workflow.model.history and not tools.calls["creative_generate_reference"]
+    assert "referenceRequest" not in job and "result" not in job
+
+
 @pytest.mark.parametrize("tool,field,blocked", [
     ("creative_get_job", "id", "creative_generate_multiview"),
     ("creative_get_job", "asset_set_id", "creative_generate_multiview"),

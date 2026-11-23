@@ -702,3 +702,25 @@ web-scan 尚未提供原生请求幂等键，不能将“唯一采集与参数�
 
 - 修改前，16 项新回归中 15 项失败，复现缺少/串用任务回执、无效计数、概念模式误标、旧条目仍称已验证、有效旧条目不能升级，以及错误标签进入普通聊天。修复后新增 **18 项回归**全通过，另验证完整 Workflow 启动能核对旧条目且不调用模型/图形工具、不修改源任务；遗忘条目不恢复，偏好和原创建时间保持，读取降级保留原 JSON，当前条目重复索引无写入。复现命令：`.venv/bin/python -m pytest -c pytest.ini -q agent/tests/test_memory_evidence.py`。
 - 全量 **405 项 Python、11 项 Node** 测试通过，依赖、浏览器脚本语法和差异检查通过。使用真实 LangGraph、临时 SQLite 与任务日志、明确的模型/工具替身，未调用真实 API、消耗模型额度、下载权重、运行 Brush 或重启常驻服务。保存的头部校验回执不保证产物当前可访问，也不验证全部顶点、外观或几何；真实生成视图及端到端 3D 质量仍需独立验收。
+
+## 2026-11-23：图片工作线程隔离存储异常，生成前检查线程状态
+
+开始时无适用的 AGENTS.md，工作区干净；`codex/local-graphics-agent` 与用户仓库 main、同名分支均为 `d722640`，两条 CI 成功。11 月 21 日已处理 Agent 队列，本轮检查的是独立的 Creative MCP 线程：`claim()` 或 `execute()` 的失败收尾再次抛异常时，线程直接退出，健康接口却仍只报告模型已配置。用真实线程和临时 SQLite 注入领取异常，复现线程退出、配置仍为 true，之后的图片任务无人执行。
+
+- 每次领取及执行增加异常边界，已知任务只尝试记录失败；持续不可写时保留原记录。异常后等待 250 毫秒再领取 `queued` 任务，关闭信号可以中断等待，日志不包含异常正文。领取已提交但回执丢失时，不重领 `running` 任务；模型已返回但收尾失败也不重发生图。显式取消和启动时将遗留任务标为中断仍走既有规则。
+- `creative_health` 增加 `worker_running`：线程存活且未收到停止信号才为 true。生成预检遇到明确的 false，在调用规划模型和提交参考图之前停止；旧 MCP 缺字段时兼容。启动恢复异常仍直接传播，不以健康状态掩盖启动失败。没有新增界面、依赖、模型调用或自动重试生成。
+
+### 来源与取舍
+
+检索和阅读日期：2026-11-23。
+
+- 核对 [LangGraph 1.2.24](https://github.com/langchain-ai/langgraph/releases/tag/1.2.24)（2026-11-20 01:10 UTC）及 [Deep Agents 0.7.41](https://github.com/langchain-ai/deepagents/releases/tag/deepagents%3D%3D0.7.41)（同日 02:07 UTC），仍为检索时最新发布。阅读 [LangGraph #9408 的 executor 源码差异](https://github.com/langchain-ai/langgraph/pull/9408/files)（2026-10-26 18:15 UTC 合并）：已被错误处理器接管的 Future 不再在执行器退出时重复抛出。本项目故障在图外的图片线程，因此在该线程建立边界，不升级框架或给生图节点增加 RetryPolicy。[官方故障容错文档](https://docs.langchain.com/oss/python/langgraph/fault-tolerance#treat-a-missing-acknowledgement-as-unknown)强调回执缺失不能证明操作未执行，本轮保留未知任务和请求幂等标识。
+- 阅读 [AgentFaultBench §3 的结果判定](https://arxiv.org/html/2611.20711v1)（[2026-11-16 08:19 UTC 首发](https://arxiv.org/abs/2611.20711)，检索时仅 v1）：任务状态、实际文件与执行验证需分别检查，不能凭最终文字判定成功。本轮同时核对持久状态、下一任务、供应商替身调用数和 MCP 回传。论文针对隔离 GitLab 的构造故障，未收集人工验证；不外推故障发生率或将其成绩视为本项目效果。
+- 核对 [Python 3.12 Thread.is_alive](https://docs.python.org/3.12/library/threading.html#threading.Thread.is_alive) 与 [Event.wait](https://docs.python.org/3.12/library/threading.html#threading.Event.wait)：采用线程存活信号及可被停止事件打断的等待，没有引入线程自动重启或强杀在途请求。
+- 阅读用户 [Web-scan 的观测筛选源码](https://github.com/sakorman/web-scan/blob/08e50537f9799948c1f746bb0a44d0f42a15ede0/scripts/benchmark_track_color.py)与[重复轨迹观测报告](https://github.com/sakorman/web-scan/blob/08e50537f9799948c1f746bb0a44d0f42a15ede0/docs/TRACK-OBSERVATIONS.md)（2026-11-23 10:15 +08 提交）：只排除重复照片组并保留其他合格观测，用于离线颜色诊断；没有修改训练，覆盖空白与重建波动仍存在。本项目不据此改变生成视图的几何门槛、Brush 预设或引入校色。
+
+### 验证与边界
+
+- 首批 7 项回归在修改前失败；最终新增 **10 项回归**通过，覆盖领取前失败、领取提交后丢回执、图像已返回后的持续收尾失败、可恢复的失败写入、持续领取故障下关闭、启动恢复失败、线程生命周期、真实 MCP 会话，以及概念/3D 两种模式的生成前拦截。持久未知任务保持原状态，同一请求不新增任务，后续任务完成；取消或新 Store 启动恢复均没有重发生图。复现命令：`.venv/bin/python -m pytest -c pytest.ini -q mcp/tests/test_creative_worker.py agent/tests/test_workflow.py`。
+- 全量 **415 项 Python、11 项 Node** 测试通过，依赖、浏览器脚本语法和差异检查通过。使用真实工作线程、SQLite、LangGraph 和官方 MCP SDK 内存连接，供应商是明确的离线替身；故障在存储接口注入，未模拟真实断电或文件系统损坏。未调用外部模型、消耗额度、下载权重、运行 Brush 或重启常驻服务。
+- 线程存活不保证存储、网络或供应商可用，也不能发现阻塞中的调用。全局存储故障仍可能阻止所有任务，未知任务需恢复存储后取消或重启核对，不自动续做。更新需重启 Agent 与 Creative MCP；本轮验证不代表真实生成视图一致性或端到端 3D 质量验收。
