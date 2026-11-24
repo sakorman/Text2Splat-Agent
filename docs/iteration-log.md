@@ -724,3 +724,23 @@ web-scan 尚未提供原生请求幂等键，不能将“唯一采集与参数�
 - 首批 7 项回归在修改前失败；最终新增 **10 项回归**通过，覆盖领取前失败、领取提交后丢回执、图像已返回后的持续收尾失败、可恢复的失败写入、持续领取故障下关闭、启动恢复失败、线程生命周期、真实 MCP 会话，以及概念/3D 两种模式的生成前拦截。持久未知任务保持原状态，同一请求不新增任务，后续任务完成；取消或新 Store 启动恢复均没有重发生图。复现命令：`.venv/bin/python -m pytest -c pytest.ini -q mcp/tests/test_creative_worker.py agent/tests/test_workflow.py`。
 - 全量 **415 项 Python、11 项 Node** 测试通过，依赖、浏览器脚本语法和差异检查通过。使用真实工作线程、SQLite、LangGraph 和官方 MCP SDK 内存连接，供应商是明确的离线替身；故障在存储接口注入，未模拟真实断电或文件系统损坏。未调用外部模型、消耗额度、下载权重、运行 Brush 或重启常驻服务。
 - 线程存活不保证存储、网络或供应商可用，也不能发现阻塞中的调用。全局存储故障仍可能阻止所有任务，未知任务需恢复存储后取消或重启核对，不自动续做。更新需重启 Agent 与 Creative MCP；本轮验证不代表真实生成视图一致性或端到端 3D 质量验收。
+
+## 2026-11-24 多视角图片导入前核对已完成任务
+
+工作区开始时干净，无适用的 AGENTS.md。工作分支和用户仓库两条分支均为 `854f6e4`，两项 CI 成功。Creative 先把清单写入文件，再向 SQLite 提交任务结果。如果这两步之间取消或写入失败，文件仍可能包含 12 张图片和通过外观审核的结论。旧 Web-scan MCP 只看清单，直接调用导入工具时会为这样的集合创建采集。
+
+现在首次导入、恢复未完成采集和确认已冻结采集都先读取任务记录。仅接受已成功且任务 ID、集合 ID 均匹配的记录。两份记录中的外观审核必须明确通过，审核内容和按顺序排列的 12 个图片条目也须一致。上传仍使用核对文件摘要时读取的同一份 PNG 字节。记录缺失或冲突会在访问 Web-scan 之前终止，保留已有采集和映射。运行中的 Web-scan MCP 在下次重启时载入此检查。
+
+### 来源与取舍
+
+以下资料于 2026-11-24 核对。
+
+- Deep Agents Code 0.2.14 于 11 月 24 日 02:45 UTC 发布。另阅读 11 月 23 日的 Deep Agents 发布工具源码，`prepareApply` 在写入前将草稿的依赖清单与项目生成的清单比对。这是发布工具的做法。本项目使用已有任务记录在导入时做类似核对，无需升级 Agent 框架。[发布记录](https://github.com/langchain-ai/deepagents/releases/tag/deepagents-code%3D%3D0.2.14) · [源码差异](https://github.com/langchain-ai/deepagents/commit/efba634640e75a901d35d85e05c8f2f7c91909de)
+- Ren 与 Ahn 的论文在第 4 节按原始记录核验评估来源及覆盖范围。借鉴其方法，测试同时断言任务状态和下游实际操作。论文的业务分析场景与本项目的图片几何质量分开验收。11 月 4 日首发，检索时仅 v1。[论文与版本](https://arxiv.org/abs/2611.07051) · [第 4 节](https://arxiv.org/html/2611.07051v1#S4)
+- Web-scan 11 月 24 日的纹理诊断先核对实拍留出图的摘要和尺寸，才对其分区统计轨迹覆盖。这里的输入由模型生成，只用持久记录核验导入来源，几何仍需实际求姿和重建。[诊断源码](https://github.com/sakorman/web-scan/blob/d9666ee4cff180109819701091a09244d2f9f819/scripts/benchmark_texture_support.py) · [实拍验证](https://github.com/sakorman/web-scan/blob/d9666ee4cff180109819701091a09244d2f9f819/docs/TEXTURE-SUPPORT.md)
+
+### 验证与后续
+
+- 新增 5 项回归。在旧版，4 项触发了创建采集的 POST，1 项查询了已有采集。修复后，清单落盘后取消、落盘后失败、被改成通过的审核、PNG 与清单一起被替换、恢复时审核记录不符这五种情况均产生零次 Web-scan 请求。可运行 `.venv/bin/python -m pytest -c pytest.ini -q mcp/tests/test_pipeline.py -k committed_multiview` 复现。
+- 另通过官方 MCP SDK 调用真实导入工具，接入本机 Web-scan HTTP 服务，两侧使用临时数据库，图片和审核来自离线替身。取消的任务产生 0 个采集。有效任务连续导入两次后共有 1 个冻结采集、12 帧和 0 个训练任务。
+- 全量 420 项 Python、11 项 Node 测试通过。真实模型 API 调用和模型额度消耗均为零。此次验收到图片交接为止，真实多视角一致性和 Brush 产物质量仍需端到端样例验证。

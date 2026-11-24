@@ -52,16 +52,36 @@ class Webscan:
         return {"available": data.get("status") == "ok", "brush_available": bool(data.get("brush_available")),
                 "min_images": data.get("min_capture_frames", 12), "url": self.url}
 
-    def import_views(self, asset_set_id):
-        valid_id(asset_set_id)
+    def _reviewed_manifest(self, asset_set_id):
         manifest = self.store.manifest(asset_set_id)
-        images = manifest.get("assets", [])
-        if (manifest.get("kind") != "multiview" or not isinstance(images, list) or len(images) != 12
+        images = manifest.get("assets") if isinstance(manifest, dict) else None
+        if (not isinstance(images, list) or len(images) != 12 or manifest.get("kind") != "multiview"
                 or not all(isinstance(a, dict) and isinstance(a.get("sha256"), str) for a in images)
                 or len({a["sha256"] for a in images}) != 12):
             raise ValueError("重建需要 12 张不同的候选视图")
-        if manifest.get("review", {}).get("consistent") is not True:
+        review = manifest.get("review")
+        if not isinstance(review, dict) or review.get("consistent") is not True:
             raise ValueError("候选视图尚未通过外观一致性检查")
+        # The manifest can be on disk before Creative commits its terminal result.
+        job = self.store.get(asset_set_id)
+        if (job.get("id") != asset_set_id or job.get("status") != "succeeded"
+                or job.get("asset_set_id") != asset_set_id):
+            raise ValueError("多视角任务尚未确认成功，无法导入候选视图")
+        saved_review = job.get("review")
+        if not isinstance(saved_review, dict) or saved_review.get("consistent") is not True or saved_review != review:
+            raise ValueError("候选视图的审核结论与任务记录不一致")
+        saved = job.get("assets")
+        if not isinstance(saved, list) or len(saved) != len(images):
+            raise ValueError("候选视图数量与任务记录不一致")
+        for index, (asset, recorded) in enumerate(zip(images, saved)):
+            if asset != recorded:
+                raise ValueError(f"第 {index + 1} 张候选视图的清单与已审核任务不一致")
+        return manifest
+
+    def import_views(self, asset_set_id):
+        valid_id(asset_set_id)
+        manifest = self._reviewed_manifest(asset_set_id)
+        images = manifest["assets"]
         with self.lock:
             key = "import:" + asset_set_id
             linked = self.store.link(key)

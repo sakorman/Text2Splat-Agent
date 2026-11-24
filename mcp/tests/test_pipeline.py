@@ -413,6 +413,52 @@ def test_unreviewed_or_invalid_view_never_creates_capture(setup, fault):
     assert requests == [] and store.link("import:" + aid) is None
 
 
+@pytest.mark.parametrize("fault", ["cancelled_after_save", "failed_after_save", "review_rejected",
+                                   "replaced_with_new_manifest", "changed_review_on_linked_capture"])
+def test_import_requires_the_committed_multiview_result(setup, monkeypatch, fault):
+    settings, store, fake, creative = setup
+    ref = completed_reference(creative, store)
+    aid = creative.multiview(ref, "multi")["id"]
+    original_save = store.save_manifest
+
+    def interrupt_after_save(asset_id, manifest):
+        original_save(asset_id, manifest)
+        if fault == "cancelled_after_save":
+            creative.cancel(asset_id)
+        elif fault == "failed_after_save":
+            raise OSError("injected failure after writing the manifest")
+
+    fake.consistent = fault != "review_rejected"
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "save_manifest", interrupt_after_save)
+        creative.execute(*store.claim())
+
+    expected_status = {"cancelled_after_save": "cancelled", "failed_after_save": "failed",
+                       "review_rejected": "needs_review"}.get(fault, "succeeded")
+    state = store.get(aid)
+    assert state["status"] == expected_status
+    manifest = store.manifest(aid)
+    key = "import:" + aid
+    if fault == "review_rejected":
+        manifest["review"]["consistent"] = True
+    elif fault == "replaced_with_new_manifest":
+        manifest["assets"][0] = store.save_image(aid, 0, png(61))
+    elif fault == "changed_review_on_linked_capture":
+        store.link(key, {"session_id": "a" * 32, "complete": True})
+        manifest["review"]["reason"] = "不同的审核记录"
+    original_save(aid, manifest)
+    prior_link = store.link(key)
+
+    def unexpected_request(request):
+        pytest.fail(f"unexpected web-scan call: {request.method} {request.url.path}")
+
+    with httpx.Client(base_url=settings.webscan_url, transport=httpx.MockTransport(unexpected_request)) as client:
+        with pytest.raises(ValueError, match="多视角|候选"):
+            Webscan(settings, store, client).import_views(aid)
+    assert store.get(aid) == state and store.link(key) == prior_link
+    assert fake.calls == 13 and fake.reviews == 1
+
+
 @pytest.mark.parametrize("fault", ["wrong-session", "foreign-frame", "missing-frame", "wrong-digest", "duplicate-order"])
 def test_import_rejects_unrelated_or_incomplete_ready_capture(setup, fault):
     settings, store, _, creative = setup
