@@ -18,11 +18,15 @@ class Creative:
         self.thread = None
 
     def health(self):
-        return {"configured": bool(self.settings.zhipu_key), "image_provider": self.settings.image_provider,
+        issue = self.settings.generation_config_error()
+        provider = self.settings.image_provider
+        models = {"cogview": "cogview-3-flash", "seedream": "doubao-seedream-4-0-250828"}
+        return {"configured": issue is None, "configuration_error": issue,
+                "image_provider": provider if provider in models else None,
                 "worker_running": self.thread is not None and self.thread.is_alive() and not self.stop.is_set(),
                 "paid_enabled": self.settings.allow_paid, "reference_conditioned": self.settings.image_provider == "seedream",
                 "text_model": self.settings.text_model, "vision_model": "glm-4.6v-flash",
-                "image_model": "cogview-3-flash" if self.settings.image_provider == "cogview" else "doubao-seedream-4-0-250828"}
+                "image_model": models.get(provider)}
 
     def reference(self, prompt, request_id):
         self.settings.check_generation()

@@ -10,6 +10,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from pydantic import ValidationError
 
+from graphics_mcp.settings import GENERATION_CONFIG_ERRORS
 from graphics_mcp.webscan import RECONSTRUCTION_REJECTION_CODES
 
 from .react import ACTIONS, ReActModel
@@ -416,8 +417,14 @@ class Workflow:
             if not health.get("available") or not health.get("brush_available"):
                 raise ToolFailure("请先启动本地 web-scan 并安装 Brush，再尝试 3D 重建")
         provider = await self.tools.call("creative_health", {})
-        if not provider.get("configured"):
-            raise ToolFailure("请在本地 .env 配置 ZHIPU_API_KEY 并重启 MCP 服务")
+        if provider.get("configured") is not True:
+            # Older Creative servers reported only whether the Zhipu key was set.
+            if provider.get("configured") is False and "configuration_error" not in provider:
+                raise ToolFailure(GENERATION_CONFIG_ERRORS["missing_zhipu_key"])
+            code = provider.get("configuration_error")
+            if isinstance(code, str) and code in GENERATION_CONFIG_ERRORS:
+                raise ToolFailure(GENERATION_CONFIG_ERRORS[code])
+            raise ToolFailure("请检查本地 Creative MCP 的生图配置并重启服务")
         if provider.get("worker_running") is False:
             raise ToolFailure("图片 MCP 工作线程未运行，请重启 Creative MCP 服务后再生成")
         self.check(state)

@@ -216,6 +216,17 @@ def test_missing_key_paid_opt_in_and_path_validation(setup):
         local_url("https://cloud.example.com")
 
 
+@pytest.mark.parametrize("provider,allow_paid", [("cogview", False), ("seedream", True)])
+def test_health_accepts_locally_configured_image_provider_without_probing_it(setup, provider, allow_paid):
+    settings, store, fake, _ = setup
+    settings = replace(settings, image_provider=provider, allow_paid=allow_paid, ark_key="ark-test-only")
+    settings.check_generation()
+    health = Creative(settings, store, fake).health()
+    assert health["configured"] and health["configuration_error"] is None
+    assert health["image_provider"] == provider and health["worker_running"] is False
+    assert fake.calls == 0
+
+
 def test_provider_payloads_do_not_invent_cogview_reference_support(setup):
     settings, _, _, _ = setup
     requests = []

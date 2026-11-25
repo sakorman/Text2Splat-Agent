@@ -744,3 +744,23 @@ web-scan 尚未提供原生请求幂等键，不能将“唯一采集与参数�
 - 新增 5 项回归。在旧版，4 项触发了创建采集的 POST，1 项查询了已有采集。修复后，清单落盘后取消、落盘后失败、被改成通过的审核、PNG 与清单一起被替换、恢复时审核记录不符这五种情况均产生零次 Web-scan 请求。可运行 `.venv/bin/python -m pytest -c pytest.ini -q mcp/tests/test_pipeline.py -k committed_multiview` 复现。
 - 另通过官方 MCP SDK 调用真实导入工具，接入本机 Web-scan HTTP 服务，两侧使用临时数据库，图片和审核来自离线替身。取消的任务产生 0 个采集。有效任务连续导入两次后共有 1 个冻结采集、12 帧和 0 个训练任务。
 - 全量 420 项 Python、11 项 Node 测试通过。真实模型 API 调用和模型额度消耗均为零。此次验收到图片交接为止，真实多视角一致性和 Brush 产物质量仍需端到端样例验证。
+
+## 2026-11-25 生图配置无效时，在提交参考图前结束任务
+
+起点为 `53801b2`，工作区干净，无适用的 AGENTS.md。用户仓库 main 和工作分支均指向该提交，两项 CI 成功。Creative MCP 以前只根据智谱密钥是否存在报告配置状态。选错图片供应商或 Seedream 缺少必需配置时，3D 专家仍会先调用规划模型并记录参考图提交意图。随后 Creative 在创建子任务之前拒绝请求，Agent 查不到子任务，留在“正在取消”。
+
+健康接口和生图提交现在共用一处本地配置校验。健康接口返回有限的错误码，Agent 在预检阶段把它转换为对应提示。已配置模型的名称仅从已知供应商中选择。旧 MCP 仅返回 `configured=false` 时，Agent 继续提示检查智谱密钥。此次改动面向新发起的任务，已处于取消中的历史任务仍按已有提交记录恢复。
+
+### 依据
+
+资料核对日期为 2026-11-25。
+
+- Deep Agents Talon 0.1.2 于 11 月 24 日发布。同日的 MCP 工具筛选源码将筛选放在工具搜索处理之前。这里的工具集固定，借鉴的是校验的执行顺序，将配置核对放在生成决策之前。[发布记录](https://github.com/langchain-ai/deepagents/releases/tag/deepagents-talon%3D%3D0.1.2) · [源码](https://github.com/langchain-ai/deepagents/commit/b04f2ef7353a4de15ae9b51dc6f3c1da24b54552)
+- ProbeAgent 于 11 月 19 日首发，核对时为 v1。第 3 节保留故障触发条件并改变任务环境以检验复现。本轮在概念图和 3D 模式下改变配置，通过真实 MCP 会话核对任务终态和提交次数。[论文](https://arxiv.org/abs/2611.26897) · [方法](https://arxiv.org/html/2611.26897v1#S3)
+- 核对 Web-scan 11 月 25 日的分区误差实现，统计依赖已求姿的实拍留出图和与评分区域对齐的轨迹网格。这些数据在生图预检时尚不可用，故本轮验收只覆盖本地配置和调度。[源码](https://github.com/sakorman/web-scan/blob/268b4c6324482d719d5b39abe3ec1d8bb19a1fb9/scripts/benchmark_support_error.py)
+
+### 验证
+
+三种错误配置在旧版均复现 `CANCELLING`。更新后，真实 LangGraph、官方 MCP SDK 和临时 SQLite 的集成测试均得到 `FAILED` 和对应原因。Creative 只收到一次健康查询，3D 专家规划模型调用数与生图子任务数均为零。另验证 CogView 和具备完整本地配置的 Seedream 在健康接口中都可被识别。后者使用测试凭据，仅验证配置判定。复现命令为 `.venv/bin/python -m pytest -c pytest.ini -q agent/tests/test_image_preflight.py`。
+
+全量 425 项 Python、11 项 Node 测试通过。模型额度消耗为零，真实 API 认证、剩余额度和端到端 3D 质量仍需分别验收。运行服务在下次重启 Agent 和 Creative MCP 后载入修复。
