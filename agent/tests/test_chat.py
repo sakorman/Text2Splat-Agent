@@ -425,3 +425,31 @@ async def test_native_chat_model_http_tool_call_reaches_actual_mcp_and_specialis
     checkpoint = await chat.graph.aget_state({'configurable': {'thread_id': 'chat:' + turn['id']}})
     assert all(word not in str(checkpoint.values) for word in ['test-secret', 'private', 'untrusted completion claim'])
     assert not chat.model._reasoning_history
+
+
+@pytest.mark.parametrize('reason,with_tool', [
+    ('network_error', True), ('model_context_window_exceeded', True), ('sensitive', False),
+    (None, True), ('unknown_future_reason', False), ('tool_calls', False), ('stop', True),
+])
+async def test_unfinished_provider_choice_cannot_complete_chat_or_delegate(chat_rig, reason, with_tool):
+    chat, (_, store, tools, _) = chat_rig
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        message = {'role': 'assistant', 'content': 'fixture partial response'}
+        if with_tool:
+            message['tool_calls'] = [{'id': 'call-1', 'type': 'function', 'function': {
+                'name': 'generate_3d_model', 'arguments': '{"description":"青瓷花瓶"}'}}]
+        choice = {'index': 0, 'message': message}
+        if reason is not None:
+            choice['finish_reason'] = reason
+        return httpx.Response(200, json={'id': 'fixture', 'choices': [choice]})
+
+    chat.model = ChatModel(AgentSettings(zhipu_key='test', text_model='glm-5.3-flash'),
+                           httpx.MockTransport(respond))
+    turn = await send(chat, '生成一个青瓷花瓶')
+    assert turn['status'] == 'FAILED' and turn['jobId'] is None
+    assert 'fixture partial response' not in turn['assistant']
+    assert len(requests) == 1 and 'generationRequestKey' not in turn
+    assert not store.list() and not tools.calls

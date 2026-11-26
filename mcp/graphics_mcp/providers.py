@@ -13,7 +13,7 @@ from openai import APIConnectionError, APIStatusError
 from .settings import Settings
 from .provider_errors import http_failure_message
 from .store import MAX_IMAGE_BYTES
-from .text_models import text_request_options
+from .text_models import complete_zhipu_reply, text_request_options
 
 ZHIPU = "https://open.bigmodel.cn/api/paas/v4"
 ARK = "https://ark.cn-beijing.volces.com/api/v3"
@@ -59,7 +59,7 @@ class Providers:
         except Exception:
             raise ProviderError("模型未返回完整 JSON，请创建新版本重试") from None
         try:
-            if reply.response_metadata.get("finish_reason") == "length":
+            if not complete_zhipu_reply(reply):
                 raise ValueError()
             content = reply.content
             if not isinstance(content, str):

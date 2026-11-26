@@ -764,3 +764,23 @@ web-scan 尚未提供原生请求幂等键，不能将“唯一采集与参数�
 三种错误配置在旧版均复现 `CANCELLING`。更新后，真实 LangGraph、官方 MCP SDK 和临时 SQLite 的集成测试均得到 `FAILED` 和对应原因。Creative 只收到一次健康查询，3D 专家规划模型调用数与生图子任务数均为零。另验证 CogView 和具备完整本地配置的 Seedream 在健康接口中都可被识别。后者使用测试凭据，仅验证配置判定。复现命令为 `.venv/bin/python -m pytest -c pytest.ini -q agent/tests/test_image_preflight.py`。
 
 全量 425 项 Python、11 项 Node 测试通过。模型额度消耗为零，真实 API 认证、剩余额度和端到端 3D 质量仍需分别验收。运行服务在下次重启 Agent 和 Creative MCP 后载入修复。
+
+## 2026-11-26 在生成委派和外观审核前检查模型结束原因
+
+起点为 `18faa87`。工作区干净，用户仓库两个分支指向同一提交，两项 CI 成功。离线回放发现，智谱返回 HTTP 200 且标记为 `network_error` 时，聊天主管仍能从响应中取出 `generate_3d_model` 并创建任务。类似地，外观审核可能接受中断响应里恰好能解析的 `{"consistent":true,"reason":"一致"}`，使候选图集可导入重建。
+
+聊天主管、ReAct 专家、设计规格和外观审核现在共用一处非流式响应检查。消费普通正文或 JSON 前要求 `finish_reason=stop`。执行原生工具前要求 `finish_reason=tool_calls` 且调用可解析，之后仍由现有参数、任务状态和幂等检查决定能否执行。遗漏或未知的结束原因、解析失败的工具、结束原因与内容矛盾，均停止当前操作。后续如供应商新增正常结束原因，应先核实其语义并补充对应回放。
+
+### 依据
+
+资料核对日期为 2026-11-26。
+
+- 智谱的非流式对话补全文档列出了正常结束、工具调用、长度限制、敏感内容、上下文溢出和网络异常。项目在读取正文和执行工具之前核对该字段。[智谱 API 参考](https://docs.z.ai/api-reference/llm/chat-completion)
+- Deep Agents 11 月 25 日的修复在同步和异步工具路径先传递图中断信号，再处理通用错误。本轮也在能读到原始模型状态的适配器中做判断。同期 LangGraph 0.4.44 更新的是 CLI，本轮修复可直接在现有运行时验证。[Deep Agents 源码与测试](https://github.com/langchain-ai/deepagents/commit/2cc7901e46371840500d5e7ad4b6c45b96bd3de5) · [LangGraph CLI 发布记录](https://github.com/langchain-ai/langgraph/releases/tag/cli%3D%3D0.4.44)
+- GC-GS 于 11 月 18 日首发，检索时为 v1。其第 3.3 节处理高斯位置更新时的梯度冲突。关联项目 Web-scan 的 11 月 26 日配对实验单独调整了旋转学习率，office 一组预选区域的均方误差上升了 30.7%。该结果仅覆盖实拍数据，本轮把验证集中在已复现的模型响应问题。[GC-GS 原文](https://arxiv.org/html/2611.28111v1) · [Web-scan 配对实验](https://github.com/sakorman/web-scan/blob/285c687f30909aeaba9115036e089feceb549b01/docs/ROTATION-RATE.md)
+
+### 验证
+
+修复前，7 个异常聊天回放和 3 个异常视觉审核回放全部复现误判。修复后，这 7 个聊天回合均失败，各请求模型一次，创建 0 个生成任务。3 个审核回放均保留 12 张已生成的测试候选图，拒绝发布可导入的清单。另验证专家收到中断响应时参考图工具调用为零，设计规格中断时生图请求为零。
+
+全量 437 项 Python 和 11 项 Node 测试通过，依赖一致性检查通过。模型响应和图片来自测试替身，使用了实际的 LangChain 适配器、LangGraph 和临时 SQLite。模型额度消耗为零。本轮验证范围止于工具调度和审核，真实 3D 质量仍需通过实物件生成流程独立验收。

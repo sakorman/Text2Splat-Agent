@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from graphics_mcp.providers import ZHIPU
 from graphics_mcp.provider_errors import http_failure_message
-from graphics_mcp.text_models import QUOTA_TEXT_MODEL, ZhipuChatModel, text_request_options
+from graphics_mcp.text_models import QUOTA_TEXT_MODEL, ZhipuChatModel, complete_zhipu_reply, text_request_options
 from .tools import ToolFailure
 
 
@@ -91,9 +91,8 @@ class ReActModel:
             raise ToolFailure("Agent 决策模型连接失败；未自动重试") from None
         except Exception:
             raise ToolFailure("Agent 决策模型返回异常；未自动重试") from None
-        if (not isinstance(reply, AIMessage) or reply.invalid_tool_calls
-                or reply.response_metadata.get("finish_reason") in {"length", "content_filter"}):
-            raise ToolFailure("Agent 工具调用格式无效或被截断，未执行工具")
+        if not complete_zhipu_reply(reply, allow_tool_calls=True):
+            raise ToolFailure("模型回复未完整结束，或结束原因与工具调用不符，本轮已停止")
         # 3D decisions retain actions only; the chat subclass also keeps the visible reply.
         # Neither retains provider reasoning text or metadata.
         content = reply.content if self.retain_text and isinstance(reply.content, str) else ""

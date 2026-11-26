@@ -10,6 +10,16 @@ DEFAULT_TEXT_MODEL = "glm-4.7-flash"
 QUOTA_TEXT_MODEL = "glm-5.3-flash"
 
 
+def complete_zhipu_reply(reply, *, allow_tool_calls=False):
+    """Check the non-streaming provider receipt before consuming text or actions."""
+    if not isinstance(reply, AIMessage) or reply.invalid_tool_calls:
+        return False
+    reason = reply.response_metadata.get("finish_reason")
+    if reply.tool_calls:
+        return allow_tool_calls and reason == "tool_calls"
+    return reason == "stop"
+
+
 def text_model_from_env():
     model = os.getenv("ZHIPU_TEXT_MODEL", DEFAULT_TEXT_MODEL)
     if model not in {DEFAULT_TEXT_MODEL, QUOTA_TEXT_MODEL}:

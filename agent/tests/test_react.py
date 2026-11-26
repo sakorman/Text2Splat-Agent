@@ -296,3 +296,18 @@ async def test_react_reports_model_failure_without_starting_graphics_or_retrying
     assert len(calls) == 1 and not tools.calls["creative_generate_reference"]
     checkpoint = await workflow.graph.aget_state({"configurable": {"thread_id": job["id"]}})
     assert all(secret not in str(job) + str(checkpoint.values) for secret in ["private-provider-body", "test-secret"])
+
+
+async def test_interrupted_specialist_call_never_submits_a_reference(rig):
+    workflow, _, tools, _ = rig
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json=model_response("generate_reference", finish="network_error"))
+
+    workflow.model = ReActModel(AgentSettings(zhipu_key="test", text_model="glm-5.3-flash"),
+                                httpx.MockTransport(respond))
+    job = await complete(workflow)
+    assert job["status"] == "FAILED" and "模型回复未完整结束" in job["message"]
+    assert len(requests) == 1 and not tools.calls["creative_generate_reference"]

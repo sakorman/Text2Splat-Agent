@@ -82,6 +82,8 @@ WEBSCAN_URL=http://127.0.0.1:8787
 
 聊天入口采用主管与专家协作：`chat_supervisor → 普通回复 / delegate_3d_agent → 内置 MCP → 3D 工作队列`。每条聊天通常只调用模型一次；原生工具选择通过参数与单次委派检查后，由 MCP 受理并返回任务 ID。受理回执由程序展示，不把“已开始”说成“已完成”，也不等待重建结束才允许下一轮聊天。同一对话已有活动生成时拒绝重复委派，仍可继续普通对话。
 
+Agent 和 Creative MCP 都会核对智谱返回的 `finish_reason`。普通回复、设计规格和外观审核要求 `stop`，选择工具要求 `tool_calls` 且工具参数可解析。模型报告中断、遗漏结束原因，或结束原因与内容矛盾时，本轮会显示失败。重启 Agent 和 Creative MCP 后生效。
+
 3D 专家保留 **ReAct**：`preflight → model ⇄ tools → finish`。选定的文本模型（默认 `glm-4.7-flash`）通过 LangChain 原生 function calling 选择行动，工具结果作为 ToolMessage 返回模型，再由模型决定继续、检查任务或停止。专家收到主管整理的物件要求，不接收整段闲聊历史；任务 ID、供应商、训练参数和结果地址由程序绑定。
 
 模型可调用 `generate_reference`、`generate_multiview`、`import_views`、`reconstruct`、`validate_result`、`inspect_task`、`finish`、`stop`。生成工具封装已有 MCP 提交与等待；LangChain StructuredTool 仍通过官方 MCP SDK 执行底层调用。真实依赖仍由代码检查：只有参考图完成才能生成候选视图，审核通过才能导入，真实重建与产物验证通过才能完成。

@@ -295,6 +295,23 @@ def test_text_and_vision_use_supported_output_modes(setup):
     assert len(requests) == 2
 
 
+def test_interrupted_design_spec_never_requests_an_image(setup):
+    settings, store, fake, creative = setup
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json={"choices": [{"finish_reason": "network_error", "message": {
+            "role": "assistant", "content": '{"title":"花瓶","object_prompt":"青瓷花瓶"}'}}]})
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        fake.plan = Providers(settings, client).plan
+        job = creative.reference("一个青瓷花瓶", "interrupted-plan")
+        creative.execute(*store.claim())
+    assert store.get(job["id"])["status"] == "failed"
+    assert len(requests) == 1 and fake.calls == 0
+
+
 def test_glm53_planning_uses_thinking_profile_without_changing_vision_or_images(setup):
     settings, store, _, _ = setup
     settings = replace(settings, text_model="glm-5.3-flash")
@@ -334,14 +351,18 @@ def test_text_model_requires_explicit_selection_and_rejects_unknown_models(monke
 
 
 @pytest.mark.parametrize("choice", [
-    {"message": {"content": "do-not-expose-secret"}},
-    {"message": {"content": "[]"}},
-    {"message": {"content": None}},
+    {"finish_reason": "stop", "message": {"content": "do-not-expose-secret"}},
+    {"finish_reason": "stop", "message": {"content": "[]"}},
+    {"finish_reason": "stop", "message": {"content": None}},
     None,
     {"finish_reason": "length", "message": {"content": '{"consistent":true,"reason":"截断"}'}},
-    {"message": {"content": '{"consistent":"true","reason":"类型错误"}'}},
-    {"message": {"content": '{"consistent":true}'}},
-], ids=["not-json", "not-object", "null-content", "null-choice", "truncated", "wrong-type", "missing-reason"])
+    {"finish_reason": "stop", "message": {"content": '{"consistent":"true","reason":"类型错误"}'}},
+    {"finish_reason": "stop", "message": {"content": '{"consistent":true}'}},
+    {"finish_reason": "sensitive", "message": {"content": '{"consistent":true,"reason":"一致"}'}},
+    {"finish_reason": "network_error", "message": {"content": '{"consistent":true,"reason":"一致"}'}},
+    {"message": {"content": '{"consistent":true,"reason":"一致"}'}},
+], ids=["not-json", "not-object", "null-content", "null-choice", "truncated", "wrong-type", "missing-reason",
+        "sensitive", "network-error", "missing-finish"])
 def test_invalid_vision_review_never_publishes_reconstructable_images(setup, choice):
     settings, store, fake, creative = setup
     ref = completed_reference(creative, store)
