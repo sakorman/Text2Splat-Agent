@@ -1,3 +1,4 @@
+import hashlib
 import io
 import json
 from dataclasses import replace
@@ -17,9 +18,12 @@ from graphics_mcp.webscan import Webscan
 from test_webscan_ply import ply_fixture
 
 
-def png(index=0):
+def png(index=0, *, solid=False):
     buf = io.BytesIO()
-    Image.new("RGB", (512, 512), (index * 13 % 256, 100, 170)).save(buf, "PNG")
+    image = Image.new("RGB", (512, 512), (index * 13 % 256, 100, 170))
+    if not solid:
+        image.paste((110, 140, 130), (140, 100, 370, 430))
+    image.save(buf, "PNG")
     return buf.getvalue()
 
 
@@ -123,6 +127,82 @@ def test_cancel_during_image_response_never_starts_next_image(setup):
     creative.execute(*store.claim())
     assert fake.calls == 2
     assert store.get(job["id"])["status"] == "cancelled"
+
+
+@pytest.mark.parametrize("blank_at", [0, 1, 7, 12], ids=["reference", "first-view", "middle-view", "last-view"])
+def test_solid_color_stops_generation_before_review(setup, blank_at):
+    _, store, fake, creative = setup
+    calls = []
+
+    def image(prompt, reference=None):
+        index = len(calls)
+        calls.append(index)
+        return png(index, solid=index == blank_at)
+
+    fake.image = image
+    job = creative.reference("一个青瓷花瓶", "ref")
+    creative.execute(*store.claim())
+    if blank_at:
+        job = creative.multiview(job["id"], "views")
+        creative.execute(*store.claim())
+    state = store.get(job["id"])
+    assert state["status"] == "failed" and "纯色" in state["message"]
+    assert ("参考图" if blank_at == 0 else f"第 {blank_at} 张") in state["message"]
+    assert len(calls) == blank_at + 1 and fake.reviews == 0
+    assert len(state["assets"]) == max(0, blank_at - 1) and "asset_set_id" not in state
+    assert not (store.directory(job["id"]) / "manifest.json").exists()
+
+
+@pytest.mark.parametrize("kind", ["reference", "multiview"])
+def test_previously_accepted_solid_color_is_checked_before_reuse(setup, kind):
+    settings, store, fake, creative = setup
+    aid = completed_reference(creative, store)
+    if kind == "multiview":
+        aid = creative.multiview(aid, "views")["id"]
+        creative.execute(*store.claim())
+    # Model a pre-upgrade success. The same flat pixels and file were recorded
+    # in both the manifest and the database, so integrity checks alone pass.
+    manifest = store.manifest(aid)
+    state = store.get(aid)
+    index = len(manifest["assets"]) - 1
+    raw = png(21, solid=True)
+    asset = manifest["assets"][index]
+    with Image.open(io.BytesIO(raw)) as image:
+        asset["sha256"] = hashlib.sha256(image.tobytes()).hexdigest()
+    asset["file_sha256"] = hashlib.sha256(raw).hexdigest()
+    (store.directory(aid) / asset["name"]).write_bytes(raw)
+    state["assets"] = manifest["assets"]
+    store.save_manifest(aid, manifest)
+    with store.transaction() as db:
+        db.execute("UPDATE jobs SET state=? WHERE id=?", (json.dumps(state), aid))
+
+    if kind == "reference":
+        job = creative.multiview(aid, "reuse")
+        creative.execute(*store.claim())
+        result = store.get(job["id"])
+        assert result["status"] == "failed" and "纯色" in result["message"]
+        assert fake.calls == 1 and fake.reviews == 0
+    else:
+        def unexpected(request):
+            pytest.fail(f"unexpected Web-scan request: {request.method} {request.url.path}")
+
+        with httpx.Client(base_url=settings.webscan_url, transport=httpx.MockTransport(unexpected)) as client:
+            with pytest.raises(ValueError, match="第 12 张.*纯色"):
+                Webscan(settings, store, client).import_views(aid)
+        assert store.link("import:" + aid) is None
+    assert store.get(aid) == state
+
+
+def test_single_channel_one_pixel_difference_survives_the_color_check(setup):
+    _, store, fake, creative = setup
+    image = Image.new("RGB", (512, 512), (100, 100, 100))
+    image.putpixel((256, 256), (100, 101, 100))
+    buf = io.BytesIO()
+    image.save(buf, "PNG")
+    fake.image = lambda prompt: buf.getvalue()
+    ref = completed_reference(creative, store)
+    entry = store.manifest(ref)["assets"][0]
+    assert store.read_saved_image(ref, 0, entry, label="参考图") == buf.getvalue()
 
 
 @pytest.mark.parametrize("fault", ["replaced", "missing", "missing_digest", "wrong_filename", "cancelled"])

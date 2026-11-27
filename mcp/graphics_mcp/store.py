@@ -21,6 +21,11 @@ def valid_id(value: str) -> str:
     return value
 
 
+def require_pixel_variation(image, label):
+    if all(low == high for low, high in image.getextrema()):
+        raise ValueError(f"{label}整张为纯色，缺少可见的物件细节。请重新生成。")
+
+
 class Store:
     def __init__(self, root: Path):
         self.root = root
@@ -148,9 +153,14 @@ class Store:
             raise ValueError(f"{label}无法读取，未开始重建") from None
         if not raw or len(raw) > MAX_IMAGE_BYTES or hashlib.sha256(raw).hexdigest() != expected:
             raise ValueError(f"{label}与生成时保存的文件不一致，未开始重建")
+        # Previously accepted PNGs can match both receipts and still be blank.
+        with Image.open(io.BytesIO(raw)) as image:
+            if image.format != "PNG" or image.mode != "RGB" or max(image.size) > 2048:
+                raise ValueError(f"{label}与保存的图片格式不符")
+            require_pixel_variation(image, label)
         return raw
 
-    def save_image(self, asset_id, index, raw):
+    def save_image(self, asset_id, index, raw, *, label="生成图片"):
         if not raw or len(raw) > MAX_IMAGE_BYTES:
             raise ValueError("图片为空或超过 16 MB")
         with Image.open(io.BytesIO(raw)) as source:
@@ -158,6 +168,7 @@ class Store:
                 raise ValueError("生成图片尺寸不符合要求")
             image = ImageOps.exif_transpose(source).convert("RGB")
             image.thumbnail((2048, 2048))
+            require_pixel_variation(image, label)
             digest = hashlib.sha256(image.tobytes()).hexdigest()
             directory = self.directory(asset_id)
             directory.mkdir(exist_ok=True)

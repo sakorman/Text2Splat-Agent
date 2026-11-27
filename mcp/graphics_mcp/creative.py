@@ -55,7 +55,7 @@ class Creative:
                 self.store.update(jid, stage="reference", message="正在生成参考图", spec=spec)
                 raw = self.providers.image(spec["object_prompt"] + "。单张完整物件摄影，三分之四前视角，物体完整入镜，画面四周留白。")
                 self.checkpoint(jid)
-                asset = self.store.save_image(jid, 0, raw)
+                asset = self.store.save_image(jid, 0, raw, label="参考图")
                 manifest = {"kind": kind, "spec": spec, "assets": [asset], "provider": self.settings.image_provider}
             else:
                 reference_id = payload["reference_id"]
@@ -78,7 +78,7 @@ class Creative:
                               "颜色、光照不变。单张图片，不要拼图。物体完整入镜、居中、四周留白，无道具。")
                     raw = self.providers.image(prompt, ref_raw)
                     self.checkpoint(jid)
-                    assets.append(self.store.save_image(jid, index, raw))
+                    assets.append(self.store.save_image(jid, index, raw, label=f"第 {index + 1} 张候选视图"))
                     self.checkpoint(jid)
                     digest = assets[-1]["sha256"]
                     if digest in seen:
